@@ -161,7 +161,9 @@ pub fn castShapeVsShapeLocalSpace(shape_cast_local: *const ShapeCast, shape_cast
 /// The only difference is that the shape cast (shape_cast_world) is provided in world space.
 /// Note: A shape cast contains the center of mass start of the shape, if you have the world transform of the shape you probably want to construct it using ShapeCast.fromWorldTransform.
 pub fn castShapeVsShapeWorldSpace(shape_cast_world: *const ShapeCast, shape_cast_settings: *const ShapeCastSettings, shape: *const Shape, scale: Vec3, shape_filter: *const ShapeFilter, center_of_mass_transform2: Mat44, sub_shape_id_creator1: SubShapeIDCreator, sub_shape_id_creator2: SubShapeIDCreator, collector: *CastShapeCollector) void {
-    const local_shape_cast = shape_cast_world.postTransformed(center_of_mass_transform2.inversedRotationTranslation());
+    // (Zolt: built in place, ShapeCast.initInPlace)
+    var local_shape_cast: ShapeCast = undefined;
+    shape_cast_world.postTransformedInPlace(center_of_mass_transform2.inversedRotationTranslation(), &local_shape_cast);
     castShapeVsShapeLocalSpace(&local_shape_cast, shape_cast_settings, shape, scale, shape_filter, center_of_mass_transform2, sub_shape_id_creator1, sub_shape_id_creator2, collector);
 }
 

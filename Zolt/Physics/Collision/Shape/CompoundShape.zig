@@ -839,7 +839,9 @@ pub const CompoundShape = struct {
             // Transform the shape cast and update the shape
             const transform = shape_cast.center_of_mass_start.mul(sub_shape.getLocalTransformNoScale(shape_cast.scale));
             const sub_scale = sub_shape.transformScale(shape_cast.scale);
-            const sub_shape_cast = ShapeCast.init(sub_shape.shape.get().?, sub_scale, transform, shape_cast.direction);
+            // (Zolt: built in place, ShapeCast.initInPlace)
+            var sub_shape_cast: ShapeCast = undefined;
+            sub_shape_cast.initInPlace(sub_shape.shape.get().?, sub_scale, transform, shape_cast.direction);
 
             CollisionDispatch.castShapeVsShapeLocalSpace(&sub_shape_cast, shape_cast_settings, shape, scale, shape_filter, center_of_mass_transform2, shape1_sub_shape_id, sub_shape_id_creator2, collector);
 

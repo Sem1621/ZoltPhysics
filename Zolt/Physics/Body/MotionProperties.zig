@@ -2,8 +2,16 @@
 //! Status: complete
 //!
 //! SimulationArchitecture D1:
-//! - Fields in Jolt's order with Jolt's cache line comments. Members that Jolt leaves uninitialized default to
-//!   `undefined` (BodyManager fills them in through Body.applyBodyCreationSettings).
+//! - An `extern struct` (Phase 14), so that the fields keep Jolt's order and offsets (Jolt's cache line comments hold:
+//!   the fields that the solver and SplitIsland read share Jolt's first two cache lines; the sleep test spheres and
+//!   timer stay in the third, least used one, only the sleep test's `allow_sleeping` is in the second). The offsets
+//!   and the size are checked at compile time against Jolt's (x86-64 clang's -fdump-record-layouts, with and without
+//!   double precision, asserts and simulation stats). A plain struct let Zig move the 1 byte fields (allowed DOFs,
+//!   motion quality, step overrides) next to the sleep test spheres, a third cache line that Jolt's solver does not
+//!   touch.
+//!   The `void` fields (asserts, double precision, simulation stats) take no space. `SimulationStats` is an
+//!   `extern struct` too (an extern struct may only hold extern compatible fields). Members that Jolt leaves
+//!   uninitialized default to `undefined` (BodyManager fills them in through Body.applyBodyCreationSettings).
 //! - `mIndexInActiveBodies` is a `std.atomic.Value(u32)` loaded and stored with `.monotonic` (Jolt's TSAN-suppressed
 //!   race: FindCollidingPairsCanCollide reads it while another job activates the body).
 //! - The JPH_ENABLE_ASSERTS members (`mCachedBodyType`, `mCachedMotionType`) are typed `void` without asserts.
@@ -50,12 +58,13 @@ pub const CanSleep = enum(u32) {
 };
 
 /// The Body class only keeps track of state for static bodies, the MotionProperties class keeps the additional state needed for a moving Body. It has a 1-on-1 relationship with the body.
-pub const MotionProperties = struct {
+pub const MotionProperties = extern struct {
     /// Constant indicating that body is not active
     pub const inactive_index: u32 = 0xffffffff;
 
     /// Stats for this body. These are average for the simulation island the body was part of. (JPH_TRACK_SIMULATION_STATS)
-    pub const SimulationStats = struct {
+    /// Zolt: an `extern struct` like MotionProperties, which holds it (an extern struct cannot hold an auto layout one)
+    pub const SimulationStats = extern struct {
         /// Number of processor ticks spent doing broad phase collision detection
         broad_phase_ticks: u64 = 0,
         /// Number of ticks spent doing narrow phase collision detection
@@ -162,6 +171,50 @@ pub const MotionProperties = struct {
     comptime {
         std.debug.assert(Vec3.canLoadFloat3Unsafe(MotionProperties, "force"));
         std.debug.assert(Vec3.canLoadFloat3Unsafe(MotionProperties, "torque"));
+    }
+
+    // Zolt: Jolt's offsets and size (x86-64 clang's -fdump-record-layouts of MotionProperties.h with and without
+    // JPH_DOUBLE_PRECISION, JPH_ENABLE_ASSERTS and JPH_TRACK_SIMULATION_STATS)
+    comptime {
+        const dp = Core.double_precision;
+        const offsets = .{
+            .{ "linear_velocity", 0 },
+            .{ "angular_velocity", 16 },
+            .{ "inv_inertia_diagonal", 32 },
+            .{ "inertia_rotation", 48 },
+            .{ "force", 64 },
+            .{ "torque", 76 },
+            .{ "inv_mass", 88 },
+            .{ "linear_damping", 92 },
+            .{ "angular_damping", 96 },
+            .{ "max_linear_velocity", 100 },
+            .{ "max_angular_velocity", 104 },
+            .{ "gravity_factor", 108 },
+            .{ "index_in_active_bodies", 112 },
+            .{ "island_index", 116 },
+            .{ "motion_quality", 120 },
+            .{ "allow_sleeping", 121 },
+            .{ "allowed_dofs", 122 },
+            .{ "num_velocity_steps_override", 123 },
+            .{ "num_position_steps_override", 124 },
+            .{ "sleep_test_spheres", if (dp) 152 else 128 },
+            .{ "sleep_test_timer", if (dp) 200 else 176 },
+        };
+        for (offsets) |o| {
+            if (@offsetOf(MotionProperties, o[0]) != o[1])
+                @compileError(std.fmt.comptimePrint("MotionProperties.{s} is at {d}, Jolt's at {d}", .{ o[0], @offsetOf(MotionProperties, o[0]), o[1] }));
+        }
+        if (dp) std.debug.assert(@offsetOf(MotionProperties, "sleep_test_offset") == 128);
+        if (Core.enable_asserts) {
+            std.debug.assert(@offsetOf(MotionProperties, "cached_body_type") == if (dp) 204 else 180);
+            std.debug.assert(@offsetOf(MotionProperties, "cached_motion_type") == if (dp) 205 else 181);
+        }
+        if (track_simulation_stats) {
+            std.debug.assert(@offsetOf(MotionProperties, "simulation_stats") == if (dp) 208 else 184);
+            std.debug.assert(@sizeOf(SimulationStats) == 56 and @offsetOf(SimulationStats, "num_contact_constraints") == 48 and @offsetOf(SimulationStats, "is_large_island") == 55);
+        }
+        std.debug.assert(@sizeOf(MotionProperties) == if (track_simulation_stats) (if (dp) 272 else 240) else if (dp) 208 else 192);
+        std.debug.assert(@alignOf(MotionProperties) == Core.vector_alignment);
     }
 
     /// Motion quality, or how well it detects collisions when it has a high velocity

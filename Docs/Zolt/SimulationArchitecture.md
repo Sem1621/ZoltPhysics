@@ -80,6 +80,32 @@ comments. Jolt's size is checked at compile time; it also holds with Zig's field
     }
 ```
 
+Since Phase 14 the offsets are pinned too: a comptime block in Body.zig checks every field against
+Jolt's offset (x86-64 clang, both precisions). Body's fields are already sorted by alignment, so Zig's
+layout keeps Jolt's order.
+
+`MotionProperties` is an `extern struct` (Phase 14). As a plain struct Zig moved its 1 byte fields
+(motion quality, allow sleeping, allowed DOFs, the step overrides) next to the sleep test spheres, a
+third cache line per body that Jolt's solver never loads. The extern layout restores Jolt's two cache
+lines: the velocities, the inertia, the force and torque, the damping and the island data in the first
+two, the sleep test in the third. A comptime block checks every offset and the size against Jolt's
+(clang's `-fdump-record-layouts` of MotionProperties.h, with and without double precision, asserts and
+`JPH_TRACK_SIMULATION_STATS`) and fails with the field's name:
+
+```zig
+    for (offsets) |o| {
+        if (@offsetOf(MotionProperties, o[0]) != o[1])
+            @compileError(std.fmt.comptimePrint("MotionProperties.{s} is at {d}, Jolt's at {d}", .{ o[0], @offsetOf(MotionProperties, o[0]), o[1] }));
+    }
+```
+
+- The `void` members (asserts off, single precision, simulation stats off) take no space in an extern
+  struct. `SimulationStats` (only a field with `track_simulation_stats`) is an `extern struct` as well.
+- `BodyWithMotionProperties` puts the motion properties at offset 128 like Jolt in single precision. In
+  double precision Jolt's compiler places them in Body's tail padding (offset 144), which Zig does not
+  reuse (offset 160); BodyManager.zig pins both. The sizes stay 320 / 384 bytes (204 / 170 slots per
+  64 KB page of the body pool).
+
 **Flags.**
 - Private flag enums that Jolt changes with atomic or / and (`Body::EFlags`,
   `CachedManifold::EFlags`) become integer constants in a `Flags` namespace on an atomic field

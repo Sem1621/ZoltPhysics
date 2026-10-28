@@ -164,7 +164,10 @@ both types) when porting code needs them.
 
 - Plain data that Jolt copies by value (Vec3, AABox, BodyID, ...) is a `struct`. Use
   `extern struct` when layout matters: SIMD types, data that is hashed/streamed as bytes,
-  data shared with GPU code. Uninitialized C++ values (`Vec3 v;`) become `var v: Vec3 = undefined;`.
+  data shared with GPU code, and hot data whose cache lines Jolt groups by hand (`MotionProperties`: Zig's auto layout
+  moved its 1 byte fields to a third cache line that the solver then had to load; pin Jolt's offsets at compile time,
+  as MotionProperties and Body do). An extern struct can only hold extern compatible fields (`SimulationStats` is
+  extern too; `void` fields are fine). Uninitialized C++ values (`Vec3 v;`) become `var v: Vec3 = undefined;`.
 - **Large values.** A value with comptime-known fields (`.empty`, `.{}`, a field default) is one constant in Zig
   0.16. Its `undefined` bytes are part of that constant, so storing it writes the whole object: a `memset` or a copy
   from read-only data. Only a plain `var x: T = undefined;` costs nothing. Jolt's constructors set only the headers
@@ -188,6 +191,21 @@ both types) when porting code needs them.
   library code of ZoltPerformanceTest, also where LLVM inlined it into the test program. The setup sites that may
   stay are listed in `ALLOW` in `tools/check_codegen.py`. `zig build perf-budget` compares the instruction counts
   with C++ ([Roadmap.md](Roadmap.md), Phase 10).
+
+  **Store forwarding (Phase 14).** In hot code (per step, body, contact, cast or hit) build a by-value result of
+  over 32 bytes in place as well, not only one of over 256 bytes: `fn initInPlace(out: *T, ...)`, with a local or the
+  caller's field as `out`. Returned by value, LLVM stores it with 16 byte stores and copies it right after with
+  32 byte (ymm) loads (`-Dcpu=x86_64_v3`); a load that spans two stores still in the store buffer fails store
+  forwarding (12 to 17 cycles). For the same reason copy an AABox or a Mat44 that a call just returned (a virtual
+  `getWorldSpaceBounds` writes its AABox with two 16 byte stores) in 16 byte halves: `box.assignInHalves(&bounds)`,
+  or column by column through `Core.opaqueVector`, which keeps LLVM from merging the halves back into one 32 byte
+  copy (a plain `dst.* = src.*` of a 32 byte struct is one ymm load / store pair). Keep Jolt's by-value function as
+  the API, make the in place one evaluate the same expressions on the same inputs, assert that `out` does not overlap
+  them, and test that both give the same bytes (ShapeCast.zig: `initInPlace`, `postTransformedInPlace`,
+  `postTranslatedToShapeCastInPlace`; `Body.calculateWorldSpaceBoundsInternal`). Callgrind does not model store
+  forwarding: count the failures with a store buffer model over valgrind lackey's memory trace. If the bigger callee
+  is no longer inlined at a hot call site, `@call(.always_inline, ...)` restores the inlining (the CCD hit in
+  PhysicsSystem.zig).
 - `static_assert(sizeof(X) == N)` → `comptime { std.debug.assert(@sizeOf(X) == N); }`.
 - **Line pinned layouts (class A speed work, Roadmap Phase 14, layout only).** Where a hot loop reads a few members of
   many objects that do not stay in the L1 cache between two visits, each cache line that one visit touches is a miss,
