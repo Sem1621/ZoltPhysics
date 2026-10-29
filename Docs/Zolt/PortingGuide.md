@@ -747,10 +747,10 @@ Zig 0.16 moved blocking synchronization into the `std.Io` interface (`std.Thread
   the counter, and a layout-only build with just the unused field reproduced them; every new field of PhysicsSystem
   makes Zig order its 8 byte aligned fields differently, see the next rule) and a seventh padded atomic in
   `Step.padded_atomics` (64 bytes more per Step in temp memory: every later temp allocation of the update moves, an
-  update would need 128 instead of 64 * collision_steps bytes more temp memory than Jolt, and the per-update copy of the
-  default Step grows past its codegen-check allow-list size of 0x1cf0).
+  update would need 128 * collision_steps instead of 64 * collision_steps bytes more temp memory than Jolt, and the
+  per-update copy of the default Step grows past its codegen-check allow-list size of 0x1cf0).
 - **Zig orders the fields of a struct by alignment, and the order of equally aligned fields is not the declaration
-  order in a large struct.** In PhysicsSystem (28 fields) one more 8 byte aligned field moved most of the 8 byte aligned
+  order in a large struct.** In PhysicsSystem (27 fields) one more 8 byte aligned field moved most of the 8 byte aligned
   fields to other offsets. Where a Zolt addition must not move the data of other code, put it into the free bytes at the
   end of a smaller struct whose fields keep their order (ContactConstraintManager.simd_lanes, 14 fields: the new field
   lands behind the last field of its alignment) and check the offsets in a test ("ContactConstraintManager: simd_lanes

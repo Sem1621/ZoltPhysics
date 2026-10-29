@@ -2593,6 +2593,13 @@ const PileRun = struct {
     lanes_counts: ?*[5]u32 = null,
 };
 
+/// The claims of the last step of an update are counted only by the next update (growSimdLanes): compare them with
+/// that step's laneGroupBound directly, before a release drops them and after the last update
+fn expectLastStepWithinBound(system: *PhysicsSystem) !void {
+    if (system.contact_manager.simd_lanes.block) |block|
+        try expect(block.claimed.load(.monotonic) <= system.simd_plans.lanes.step_bound);
+}
+
 /// runPile with the extras of `run`. Every step must claim at most the LaneGroups that laneGroupBound allows.
 fn runPileWith(allocator: Allocator, kind: JobSystemKind, opts: PileScene.Options, states: *std.ArrayList(u8), run: PileRun) ![4]u32 {
     var jobs: AnyJobSystem = .{};
@@ -2616,6 +2623,7 @@ fn runPileWith(allocator: Allocator, kind: JobSystemKind, opts: PileScene.Option
         if (run.per_update) |per_update|
             per_update[i] = .{ lanes.laned.load(.monotonic) - before[0], lanes.no_room.load(.monotonic) - before[1] };
         if (std.mem.indexOfScalar(usize, run.release_lanes_after, i) != null) {
+            try expectLastStepWithinBound(&scene.system); // (The release drops the claims of the last step)
             scene.system.releaseSimdLanes();
             try expect(scene.system.contact_manager.simd_lanes.block == null);
             try expectEqual(@as(u32, 0), scene.system.contact_manager.simd_lanes.capacity);
@@ -2624,6 +2632,7 @@ fn runPileWith(allocator: Allocator, kind: JobSystemKind, opts: PileScene.Option
         try scene.system.saveState(recorder.recorder(), .{});
         try states.appendSlice(allocator, recorder.getData());
     }
+    try expectLastStepWithinBound(&scene.system);
     try expectEqual(@as(u32, 0), lanes.over_bound);
     if (run.lanes_counts) |counts| counts.* = lanes.counts();
     const counts = scene.system.simd_plans.counts();

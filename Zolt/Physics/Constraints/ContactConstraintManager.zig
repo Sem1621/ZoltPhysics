@@ -51,7 +51,7 @@
 //! Zolt addition (Phase 14, class A): `simd_lanes`, the heap memory of the SIMD LaneGroups of PhysicsSystem's planned
 //! batches (ContactConstraintSimd.zig, "LaneGroups"; PhysicsSystem grows it and claims from it), freed in deinit. Its
 //! 16 bytes take free bytes at the end of the manager, so the manager stays 384 bytes (448 in Debug) and the
-//! PhysicsSystem keeps its layout: a new field of PhysicsSystem (28 fields, not in the order of declaration within an
+//! PhysicsSystem keeps its layout: a new field of PhysicsSystem (27 fields, not in the order of declaration within an
 //! alignment) made Zig order PhysicsSystem's 8 byte aligned fields differently, which moved the data of other jobs
 //! (PortingGuide section 9). The manager's fields are in the order of declaration within an alignment, so only
 //! max_constraints and cache_write_idx move by 16 bytes, within the cache line of write_cache. The test

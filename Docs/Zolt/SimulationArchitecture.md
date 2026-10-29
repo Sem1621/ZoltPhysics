@@ -1174,9 +1174,10 @@ DeterminismLog, PhysicsScene).**
     the contacts added before the error stay.
   - A single failed allocation of a growing STLLocalAllocator array is absorbed by its retry, so
     heap sweeps need a "heap runs out from allocation n on" mode (`FailingHeapAllocator.fail_from`).
-- (Phase 14) The heap allocations of an update are these three inside jobs and, outside the jobs, the growth of the
-  SIMD LaneGroups in `update` before the jobs are built (D5, "An optional heap allocation before the jobs"), the only
-  one whose failure is not an error.
+- (Phase 14) The heap allocations of an update are those inside jobs (these three, the node stack of the broad phase
+  cast of FindCCDContacts and determineCollidingShapes of the SoftBodyCollide jobs, D5) and, outside the jobs, the
+  growth of the SIMD LaneGroups in `update` before the jobs are built (D5, "An optional heap allocation before the
+  jobs"), the only one whose failure is not an error.
 - JobSolveVelocityConstraints checks the latch only at job entry (section 8, Wave A rule) and never
   allocates. `applied_impulse |= x` is `applied_impulse = x or applied_impulse`, so the contacts
   are always solved.

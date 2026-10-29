@@ -471,6 +471,7 @@ pub const PhysicsSystem = struct {
             return;
         const lanes = &self.contact_manager.simd_lanes;
         self.recordSimdLaneClaims(); // (The claims of the last step of the previous update)
+        if (lanes.block) |block| block.claimed.store(0, .monotonic); // (No job runs: the first step does not count them again)
         const demand = lanes.demand;
         lanes.demand = 0;
         if (demand <= lanes.capacity)

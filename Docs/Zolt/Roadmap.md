@@ -804,7 +804,7 @@ FindCollisions takes 55.0% of the thread time instead of 57.2%, in Pyramid 25.8%
 - The spin before the futex sleep was measured before X2. After it the idle spans under 50 us are 1.8% of the thread
   time in ConvexVsMesh at 4 threads and at most 1.0% in the other scenes: still below what a spin would need.
 
-Phase 14 measured these; its decision table says what became of them.
+Phase 14 measured these except the spin; its decision table says what became of them.
 
 ### Phase 14: class A speed, measured first (SIMD LaneGroups, character pair data) ✅
 Phase 14 measured the candidates that Phase 13 left open. As before, each item had a go rule fixed before its
@@ -812,10 +812,10 @@ measurement and a keep rule measured on the final code. Two changes are kept, bo
 hashes are unchanged, at every thread count. A third passed its go rule but missed its wall clock keep rule and was
 reverted.
 
-**Measure first.** The go rules use callgrind's data side estimate of cycles, DCEst = Ir + 10 (D1mr + D1mw + Bcm + Bim)
-+ 100 (DLmr + DLmw): CEst without the instruction cache misses, which move with the code layout alone. A noise floor run
-measured how much: master against three builds that only add a never called function (80, 336 and 1,040 bytes of code
-in PhysicsSystem.zig) gives identical Ir in every scene and a whole scene CEst up to 0.62% apart (I1 misses -9.5% to
+**Measure first.** The go rules use callgrind's data side estimate of cycles, DCEst = Ir + 10 (D1mr + D1mw + Bcm + Bim) +
+100 (DLmr + DLmw): CEst without the instruction cache misses, which move with the code layout alone. A noise floor run
+measured how much: master against three builds that only add a never called function (80, 336 and 1,040 bytes of code in
+PhysicsSystem.zig) gives identical Ir in every scene and a whole scene CEst up to 0.62% apart (I1 misses -9.5% to
 +10.3%), but DCEst at most 0.030% apart per scene and 0.047% per job. Every item had to stay inside guards set from it:
 scene and job DCEst at most +0.1% (jobs with at least 1% of the scene), and the jobs an item does not touch keep their
 Ir within 0.01%; an excess was to be settled by a 30 round wall clock A/B on that scene (decided before the keep
@@ -828,10 +828,14 @@ measured in two sessions (another working directory and environment) differs by 
 | T: SIMD LaneGroups (the gathers of the SIMD solver once per step) | the removable gathers and scatters >= 4% of Pyramid's Ir, and a prototype saves >= 2.0% of Pyramid's DCEst with Ir not up | 7.12% (288.0e6 Ir); the prototype -5.96% DCEst, -7.04% Ir | Pyramid 1 thread >= +2%, 4 threads not below 0.97 | 1.125 (14 of 15 rounds), 1.073 (15 of 15) | done |
 | K: character pair data | >= 3.0% of CharacterVirtual's DCEst, and 2 fewer L1 misses per character pair with a 48 KB and a 32 KB L1 | -13.06% (with Phase 13's compare C); 9.11 -> 6.09 misses per pair (9.13 -> 6.11 at 32 KB) | CharacterVirtual 1 thread >= +2% | 1.037 (12 of 15, p = 0.035) | done |
 | LS: MotionProperties in Jolt's field order (L) and the store forwarding sites built in place (SF) | the store forwarding failures of the HighSpeed model -15K, and DCEst -0.3% in one scene | 51,756 -> 7,338 per 2 updates (C++ 31,883); DCEst HighSpeed -0.57%, ConvexVsMesh -0.32%, Ragdoll -0.30% | HighSpeed 1 thread >= +1% in 30 rounds on one core | 1.008 (18 of 30, p = 0.36); L alone 0.992, SF alone 0.993 | reverted |
-| P: spin before the futex sleep | Phase 13's rule | not measured again: after X2 the short idle spans are at most 1.8% of the thread time | | | not done |
+| P: spin before the futex sleep | Phase 13's rule | not measured: after X2 the short idle spans were at most 1.8% of the thread time on Phase 13's last host; this host's job profiles (below) show 3.65% (Phase 13) and 4.01% (Phase 14) in ConvexVsMesh at 4 threads, above the spin rule's 3% | | | not done, a Phase 15 candidate |
 
-The final T and K stay inside every guard. LS exceeded three job guards, all simulated branch mispredictions with equal
-Ir (Pyramid FindCollisions +0.13%, SolveVelocityConstraints +0.29% in HighSpeed and +0.23% in ConvexVsMesh, from L); its
+The go rules also asked for the other scenes and jobs inside the guards. The T prototype exceeded them (CharacterVirtual
+scene DCEst +0.20%, Ragdoll's FindCollisions and FindCCDContacts +0.11% to +0.18%, with equal Ir) through the layout of
+its new PhysicsSystem field alone: a build with only that field reproduced the rises. Its go was conditional on a final
+version that leaves PhysicsSystem's layout alone, and the final T and K stay inside every guard. LS exceeded three job
+guards, all simulated branch mispredictions with equal Ir (Pyramid FindCollisions +0.13%, SolveVelocityConstraints
++0.29% in HighSpeed and +0.23% in ConvexVsMesh, from L); its go was conditional on the wall clock settling them, and its
 keep rule decided it first. LS rests on two causes Phase 13 found: Zig orders the fields of MotionProperties by
 alignment, so motion quality, allow sleeping, the allowed DOFs and the step overrides sit on a third cache line; and six
 hot call sites build a ShapeCast or a body's bounds as a value and copy it at once, a 32 byte load of narrower stores
@@ -843,23 +847,25 @@ reverted in its own commit. The model counts the failures, not their cost on a g
 contact constraints and transposed it into lanes in every velocity iteration, though between the iterations only the
 accumulated lambdas (3 + n floats of a contact with n points) and the body velocities change: 288.0e6 instructions of
 gathers, scatters and reloads in 60 Pyramid steps (7.1%). Now the warm start of a planned parallel batch (Phase 13)
-builds LaneGroups: the step constant operands of its dynamic contacts in lane order, 3,840 bytes per group of 8 (480
-per lane), in one 64 byte aligned heap block that is kept between updates. The velocity iterations run the same kernel
-with another source of operands (solveGroupFrom over a LaneSource instead of a GatherSource, so the float operations are
-the same), and the job that marks the batch's last iteration writes the lambdas back before storeAppliedImpulses; padded
+builds LaneGroups: the step constant operands of its dynamic contacts in lane order, 3,840 bytes per group of 8 (480 per
+lane), in one 64 byte aligned heap block that is kept between updates. The velocity iterations run the same kernel with
+another source of operands (solveGroupFrom over a LaneSource instead of a GatherSource, so the float operations are the
+same), and the job that marks the batch's last iteration writes the lambdas back before storeAppliedImpulses; padded
 lanes and the slots of points a contact does not have are never written back. A lane word after the plan word (a marker
 and the first group) names the batch's LaneGroups; the claims come from one counter on its own cache line in the block's
 header, reset in FinalizeIslands. Before the jobs of an update the block grows to what the previous update claimed, at
 least twice its size: Pyramid grows twice (to 1,596 groups, 6.1 MB), Ragdoll in 80 steps six times (to 1.8 MB). A batch
-without room, and every batch after a failed growth, gathers as before with the same bits, so the allocation adds no
-failure mode (SimulationArchitecture D5 and D12, section 10). Pyramid: 4.047e9 to 3.769e9 instructions (-6.9%; the
-solve job -24.9%), DCEst -5.9%; Ragdoll in 80 steps -0.46% instructions, the other scenes have no large islands in their
-measured steps.
+without room gathers as before with the same bits, and a failed growth keeps the old block (or none) and is not an
+error. The block is heap memory that Jolt does not have, kept between updates: under a bounded allocator it can make a
+later allocation fail where Jolt succeeds (SimulationArchitecture D5 and D12, section 10; releaseSimdLanes returns it).
+Pyramid: 4.047e9 to 3.769e9 instructions (-6.9%; the solve job -24.9%), DCEst -5.9%; Ragdoll in 80 steps -0.46%
+instructions, the other scenes have no large islands in their measured steps.
 
 **Character pair data (K).** Phase 13 found that the key compare of the character bounds caches costs L1 misses, not
 instructions: 7 cache lines per pair of characters, 9 with the cached transform and the replay, 69% of
 CharacterVirtual's L1 read misses. CharacterBoundsCache is now an extern struct whose members are ordered per precision,
-so that a rejected pair reads the stored key, state, pin, translation and replay head from 2 lines of its own, and
+so that a rejected pair reads the stored key and the replay head from 2 lines of its own and the state, pin and
+translation from the line it shares with CharacterBase.up (3 lines of its own in double precision), and
 CharacterVirtual holds it `align(64)` at its start, which also puts the character's live key members on fewer lines
 (comptime asserts pin every offset a rejected pair reads; PortingGuide section 5, "Line pinned layouts"). The live
 members stay the source of the compare: a direct write still makes the cache stale. The loops build only the translation
@@ -885,32 +891,34 @@ measurements plus about 10%.
 
 Steps per second (ReleaseFast, x86-64-v3, 4 cores of a 2.1 GHz Xeon with a 48 KB L1d, 2 MB L2 per core and a 260 MB L3;
 the median of 15 interleaved rounds of C++, Zolt Phase 13 and Zolt Phase 14, the 2 thread rows in a separate run; the
-same hashes on every run; the ratios are the medians of the paired per-round ratios, with the rounds that Phase 14 won):
+same hashes on every run; the ratios are the medians of the paired per-round ratios, with the rounds that Phase 14 won
+in the first ratio column):
 
 | Scene | Threads | C++ | Zolt Phase 13 | Zolt Phase 14 | Phase 14 / Phase 13 | Phase 14 / C++ |
 |---|---|---|---|---|---|---|
 | Ragdoll | 1 | 54.8 | 55.4 | 55.0 | 1.008 (8/15) | 1.00 |
 | Ragdoll | 2 | 81.8 | 82.4 | 84.6 | 1.026 (12/15) | 1.03 |
-| Ragdoll | 4 | 132.8 | 136.0 | 136.5 | 0.996 (7/15) | 1.03 |
-| ConvexVsMesh | 1 | 249.5 | 249.2 | 256.3 | 1.018 (11/15) | 1.03 |
+| Ragdoll | 4 | 132.8 | 136.0 | 136.5 | 0.996 (7/15) | 1.04 |
+| ConvexVsMesh | 1 | 249.5 | 249.2 | 256.3 | 1.018 (11/15) | 1.02 |
 | ConvexVsMesh | 2 | 369.2 | 378.4 | 370.2 | 0.998 (7/15) | 1.00 |
 | ConvexVsMesh | 4 | 555.6 | 587.4 | 577.8 | 0.977 (7/15) | 1.04 |
 | HighSpeed | 1 | 168.8 | 171.7 | 171.9 | 0.997 (5/15) | 1.02 |
-| HighSpeed | 2 | 206.4 | 211.4 | 204.6 | 0.992 (5/15) | 0.99 |
-| HighSpeed | 4 | 298.1 | 308.9 | 312.7 | 1.012 (9/15) | 1.05 |
-| CharacterVirtual | 1 | 431.9 | 529.7 | 550.1 | 1.014 (11/15) | 1.27 |
-| CharacterVirtual | 2 | 457.4 | 565.7 | 588.3 | 1.025 (10/15) | 1.29 |
-| CharacterVirtual | 4 | 471.1 | 614.1 | 623.9 | 1.041 (12/15) | 1.32 |
-| Pyramid | 1 | 70.9 | 99.1 | 109.8 | 1.103 (15/15) | 1.55 |
-| Pyramid | 2 | 90.9 | 125.8 | 130.2 | 1.028 (13/15) | 1.43 |
+| HighSpeed | 2 | 206.4 | 211.4 | 204.6 | 0.992 (5/15) | 1.01 |
+| HighSpeed | 4 | 298.1 | 308.9 | 312.7 | 1.012 (9/15) | 1.04 |
+| CharacterVirtual | 1 | 431.9 | 529.7 | 550.1 | 1.014 (11/15) | 1.26 |
+| CharacterVirtual | 2 | 457.4 | 565.7 | 588.3 | 1.025 (10/15) | 1.28 |
+| CharacterVirtual | 4 | 471.1 | 614.1 | 623.9 | 1.041 (12/15) | 1.35 |
+| Pyramid | 1 | 70.9 | 99.1 | 109.8 | 1.103 (15/15) | 1.54 |
+| Pyramid | 2 | 90.9 | 125.8 | 130.2 | 1.028 (13/15) | 1.44 |
 | Pyramid | 4 | 134.3 | 173.2 | 196.6 | 1.138 (15/15) | 1.46 |
 
-Pyramid gains 10.3% on 1 thread and 13.8% on 4 threads (all 15 rounds), CharacterVirtual 1.4% to 4.1%. The other rows
-lie between 0.977 and 1.026, none below 1 with a significant sign test; a 30 round A/B on one core gave Ragdoll on 1
-thread 0.999 (14 of 30). The keep measurement before (15 rounds, 1 and 4 threads, with each change on its own) gave T
-1.125 and 1.073 in Pyramid and K 1.037 and 1.026 in CharacterVirtual. Zolt is now at least as fast as C++ in every scene
-and thread count within the noise, and 27% to 55% faster in CharacterVirtual and Pyramid. Single runs vary by 5-29% on
-this machine ((max - min) / median); the VM ran on this host type (2.1 GHz, 48 KB / 2 MB / 260 MB) for all of Phase 14.
+Pyramid gains 10.3% on 1 thread and 13.8% on 4 threads (all 15 rounds) and 2.8% on 2 threads (13 of 15),
+CharacterVirtual 1.4% to 4.1%. The other rows lie between 0.977 and 1.026, none below 1 with a significant sign test; a
+30 round A/B on one core gave Ragdoll on 1 thread 0.999 (14 of 30). The keep measurement before (15 rounds, 1 and 4
+threads, with each change on its own) gave T 1.125 and 1.073 in Pyramid and K 1.037 and 1.026 in CharacterVirtual. Zolt
+is now at least as fast as C++ in every scene and thread count within the noise, and 26% to 54% faster in
+CharacterVirtual and Pyramid. Single runs vary by 5-29% on this machine ((max - min) / median); the VM ran on this host
+type (2.1 GHz, 48 KB / 2 MB / 260 MB) for all of Phase 14.
 
 Job profiles (`-t=4`, 500 steps, the median of 3 interleaved runs of Phase 13 and Phase 14; idle, wait and the short
 idle spans in percent of the thread time, the island preparation and the final batch in percent of the wall time):
@@ -929,11 +937,11 @@ spans (3.65% / 4.01%) are again above the spin rule's 3% at 4 threads on this ho
 spin stays a candidate.
 
 **Open, Phase 15 candidates.**
-- LaneGroups memory: the block grows to twice the previous update's claims and stays (6.1 MB in Pyramid for a peak of
-  1,011 groups, 3.9 MB). A tighter growth, or giving memory back after quiet updates, would keep the gain at less
-  memory.
+- LaneGroups memory: the block grows to the previous update's claims, at least to twice its size, and stays (6.1 MB in
+  Pyramid: 1,596 groups, twice the first block of 798, for a peak of 1,011 claimed groups, 3.9 MB). A tighter growth, or
+  giving memory back after quiet updates, would keep the gain at less memory.
 - After T, FindCollisions is 71% of Pyramid's instructions (2.66e9 of 3.77e9, 0.977 of C++'s) and the contact solve
-  0.83e9.
+  0.84e9.
 - The store forwarding failures (LS) are real in the model (44K per 2 HighSpeed updates) but did not show in the wall
   clock of this host; hardware counters (`ld_blocks.store_forward`) on a machine that exposes them would tell why.
 - CharacterVirtual's gain is shape specific: a box, cylinder, convex hull or tapered shape, or an offset center of mass,

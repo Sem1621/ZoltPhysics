@@ -1173,7 +1173,10 @@ pub const SimdLanes = struct {
     /// the old one is freed: on error.OutOfMemory nothing changes.
     pub fn replace(self: *SimdLanes, allocator: std.mem.Allocator, capacity: u32) std.mem.Allocator.Error!void {
         std.debug.assert(capacity > 0 and capacity <= max_lane_groups);
-        const memory = try allocator.alignedAlloc(u8, .fromByteUnits(Core.cache_line_size), blockSize(capacity));
+        // (A block larger than the address space, possible on 32 bit targets only, is a failed growth too)
+        const groups_size = std.math.mul(usize, capacity, @sizeOf(LaneGroup)) catch return error.OutOfMemory;
+        const size = std.math.add(usize, @sizeOf(BlockHeader), groups_size) catch return error.OutOfMemory;
+        const memory = try allocator.alignedAlloc(u8, .fromByteUnits(Core.cache_line_size), size);
         self.free(allocator);
         const block: *BlockHeader = @ptrCast(memory.ptr);
         block.* = .{};
