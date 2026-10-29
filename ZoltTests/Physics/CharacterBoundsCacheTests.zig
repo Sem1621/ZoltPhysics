@@ -9,7 +9,11 @@
 //!   rotations, translations from +-0 through 1e-30, 1, 5e3, 1.2e4, 1e7 to 3e38, and infinite and NaN ones. A replay
 //!   returns null exactly when a translation of its chain is not finite. In double precision the characters sit around
 //!   1e9 with a base offset of 0 and one near the position (the translation of the loop's transform). The unsupported
-//!   chains (too deep, too many offsets, compounds, a triangle, an invalid scale) build no replay.
+//!   chains (too deep, too many offsets, compounds, a triangle, an invalid scale) build no replay. Phase 14: the loops'
+//!   translation of transform2 without transform2 (`translation2`) has the bits of Jolt's `transform2.GetTranslation()`
+//!   in all 4 lanes, for signed zeros, values far from the origin (one rounding in double precision), overflowing sums
+//!   and infinite and NaN base offsets; with a base offset whose W differs from its Z, X, Y and Z keep Jolt's bits (and
+//!   W too in double precision).
 //! - T2: the reject decisions of the loops (ExpandBy + Overlaps, ExpandBy + RayAABoxHits) on the replayed box equal the
 //!   decisions on Jolt's box at the translation where they flip and 1 to 3 ulp around it on each axis and side, with
 //!   separations / paddings 0, a denormal, tiny, 0.02, huge, inf and NaN, and cast directions with zero, -0, tiny,
@@ -21,12 +25,21 @@
 //!   accept decisions (every user data the loop sets, also for pairs without a hit), on random crowds of supported and
 //!   unsupported shapes, near the origin and far from it, for CollideCharacter and CastCharacter. The fallback for a
 //!   translation that is not finite (`non_finite`: T infinite, or the OffsetCenterOfMass addition overflowing) runs
-//!   Jolt's GetWorldSpaceBounds and gives the oracle's decisions.
+//!   Jolt's GetWorldSpaceBounds and gives the oracle's decisions. A base offset whose W differs from its Z gives the
+//!   oracle's hits and decisions; only the `non_finite` counter can differ (single precision, W not finite).
 //! - T4: staleness. Direct writes to position, rotation, shape offset and character padding, CharacterBase.setUp and
 //!   base.shape.set make the cache stale (the stale counter rises, the hits equal the oracle), the refresh points make
 //!   it valid again. An attempted address reuse: the shapes come from a FixedBufferAllocator, which hands out the
 //!   address of a freed last block again. The pin keeps the old shape alive, so a new shape cannot get its address.
+//!   Phase 14: refreshes that keep the cache valid (SetPosition, a direct write and refreshBoundsCache, SetShapeOffset)
+//!   move a character across a reject boundary and back; the queries of the other character give the oracle's
+//!   decisions and the expected rejected / accepted counts, so the cached translation moves with each refresh.
 //! - T5: a MutableCompoundShape changed in place is counted unsupported and gives the oracle's hits.
+//! - Phase 14: the references of the pin (a raw pointer in the extern layout) balance through store, deinit, the
+//!   refresh points, SetShape and the destructor, also when the cache holds the last reference (the testing allocator
+//!   finds a leak or a double free); `find` in every state, with keys that differ only in the sign of a zero or the bits
+//!   of a NaN; CharacterVirtual and its cache are 64 byte aligned when created, embedded in a struct and on the stack;
+//!   the number of cache lines that a rejected pair reads, per shape kind and precision.
 //! - Bite proofs (each one makes a test of this file fail; tried and reverted):
 //!   - `up` dropped from the key: T4 setUp.
 //!   - The replayed tail of AABox::Transformed re-associated, as `T + ((v0 + v1) + v2)` and as `(T + (v0 + v1)) + v2`:
@@ -41,6 +54,21 @@
 //!     the T2 flip test passes (its boxes never differ in the sign of a zero).
 //!   - The non_finite fallback running GetWorldSpaceBounds on the cached transform without the base offset (the
 //!     decisions of the collide differ), or not counting `non_finite`: the T3 non_finite test.
+//!   - Phase 14, `translation2`: `m.translation.sub(base_offset)` in place of `add(base_offset.negate())`: the T1
+//!     translation2 signed zeros test. In double precision, rounding the cached translation to float before the
+//!     addition: T1 the replayed bounds of characters, T1 translation2 signed zeros and roundings, T3 random crowds
+//!     and T3 W != Z. `store` setting `translation` only when the state was not `.valid` (a valid to valid refresh
+//!     keeps the old translation): T4 refresh across a reject boundary (the decisions after the first move) and T1
+//!     translation2 signed zeros (it stores many keys in one cache).
+//!   - Phase 14, an accepted replayed pair building transform2 without the base offset (the collide): T3 random
+//!     crowds, T3 non_finite, T3 W != Z, T4 direct writes and the refresh points of Update.
+//!   - Phase 14, `AABox.overlaps` reading the W lane: only T3 W != Z.
+//!   - Phase 14, the pin: `setPin` storing the address without `RefConst.set` (no references): the pin references
+//!     test, T4 address reuse and the refresh points of Update. `deinit` without releasing the pin: the testing
+//!     allocator reports leaks in 12 tests, and the pin references test fails.
+//!   - Phase 14, `find` without the `.empty` check: the find in every state test.
+//!   - Phase 14, the layout (not a test of this file, the build fails): `reserved` of SingleLayout 48 -> 32 bytes,
+//!     or a new member of CharacterVirtual, fail the comptime asserts of SingleLayout and CharacterVirtual.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -729,6 +757,11 @@ fn expectSameTransformBits(a: RMat44, b: RMat44) !void {
     }
 }
 
+/// Two vectors have the same bits, all 4 lanes
+fn expectSameVec3Bits(a: Vec3, b: Vec3) !void {
+    try expect(std.mem.eql(u8, std.mem.asBytes(&a.value), std.mem.asBytes(&b.value)));
+}
+
 fn offsetPosition(center: RVec3, offset: Vec3) RVec3 {
     return center.addVec3(offset);
 }
@@ -755,19 +788,92 @@ test "CharacterBoundsCache T1: the replayed bounds of characters, with the loop'
             try expectEqual(CharacterBoundsCache.Find.valid, c.bounds_cache.find(&c.boundsCacheKey()));
             // 1a: the cached transform has the bits of GetCenterOfMassTransform
             const com = c.getCenterOfMassTransform();
-            try expectSameTransformBits(com, c.bounds_cache.center_of_mass_transform);
+            try expectSameTransformBits(com, c.bounds_cache.m.center_of_mass_transform);
             // 1b: the bounds of the loop's transform for a base offset 0, near the position and at the position
             const base_offsets = [_]RVec3{ RVec3.zero(), c.getPosition().addVec3(random.vec3(-3, 3)), c.getPosition(), center };
             for (base_offsets) |base_offset| {
                 const transform2 = com.postTranslatedRVec3(base_offset.negate()).toMat44();
                 const jolt = shape.getWorldSpaceBounds(transform2, Vec3.one());
-                const replayed = c.bounds_cache.replay.bounds(transform2.getTranslation()) orelse return error.TestUnexpectedResult;
+                // 1c (Phase 14): the loops' translation of transform2 without transform2 has its bits, W too
+                const t = c.bounds_cache.translation2(base_offset);
+                try expectSameVec3Bits(transform2.getTranslation(), t);
+                const replayed = c.bounds_cache.m.replay.bounds(t) orelse return error.TestUnexpectedResult;
                 try expectEqualReals(replayed, jolt);
                 counts.compared += 1;
             }
         }
     }
     try expect(counts.compared == 8 * supported.items.len);
+}
+
+test "CharacterBoundsCache T1: the loops' translation of transform2 without transform2, signed zeros and roundings" {
+    // CharacterBoundsCache.translation2 against Jolt's `PostTranslated(-inBaseOffset).ToMat44().GetTranslation()`, all 4
+    // lanes: the 8 sign patterns of zeros on the axes of the cached translation against the 8 of the base offset (the
+    // negation is `0 - b`, so `t + (0 - b)` is +0 where `t - b` is -0) and against small values; random values far from
+    // the origin (in double precision the sum is rounded once, after the addition); sums that overflow (in double
+    // precision only the rounding to float overflows); infinite and NaN base offsets
+    var shapes: Shapes = .{};
+    defer shapes.deinit();
+    const shape = try shapes.sphere(0.5);
+    var cache: CharacterBoundsCache = .{};
+    defer cache.deinit();
+    var random = Random.init(0x7a11);
+    const far: Real = if (Core.double_precision) 1.0e9 + 0.1 else 5.0e3;
+    const huge: Real = if (Core.double_precision) 2.0e38 else 3.0e38;
+    const inf_r = std.math.inf(Real);
+    const nan_r = std.math.nan(Real);
+    const num_translations = 8 + 256 + 2;
+    var compared: u32 = 0;
+    for (0..num_translations) |i| {
+        const t = if (i < 8) zeroSigns(i) else if (i < 8 + 256) RVec3.init(far + random.float(-3, 3), random.float(-3, 3), -far + random.float(-3, 3)) else RVec3.init(huge, -huge, if (i % 2 == 0) huge else 1);
+        const transform = RMat44.rotationTranslation(Quat.identity(), t);
+        const key: CharacterBoundsCache.Key = .{ .position = t, .rotation = Quat.identity(), .shape = shape, .shape_offset = Vec3.zero(), .up = Vec3.axisY(), .character_padding = 0 };
+        cache.store(&key, transform);
+        try expectEqual(CharacterBoundsCache.Find.valid, cache.find(&key));
+        const special = [_]RVec3{ RVec3.init(-huge, huge, -huge), RVec3.init(inf_r, -inf_r, 0), RVec3.init(nan_r, 0, -0.0), RVec3.init(-0.0, nan_r, inf_r) };
+        for (0..8 + 4 + special.len) |j| {
+            const base_offset = if (j < 8) zeroSigns(j) else if (j < 12) (if (i < 8) RVec3.init(random.float(-1, 1), 0, -0.0) else t.add(RVec3.init(random.float(-1, 1), random.float(-1, 1), 0))) else special[j - 12];
+            const expected = transform.postTranslatedRVec3(base_offset.negate()).toMat44().getTranslation();
+            try expectSameVec3Bits(expected, cache.translation2(base_offset));
+            compared += 1;
+        }
+    }
+    try expect(compared == num_translations * 16);
+}
+
+test "CharacterBoundsCache T1: translation2 with a base offset whose W differs from its Z" {
+    // X, Y and Z are always Jolt's bits. W: in double precision toVec3 copies Z into W, so all 4 lanes are Jolt's; in
+    // single precision W is `translation.Z + (0 - base_offset.W)` (Jolt's W is the sum's Z). The loops read W only in
+    // the finite test of the replay (see the T3 test of such base offsets)
+    var shapes: Shapes = .{};
+    defer shapes.deinit();
+    const shape = try shapes.sphere(0.5);
+    var cache: CharacterBoundsCache = .{};
+    defer cache.deinit();
+    const t = if (Core.double_precision) RVec3.init(1.0e9 + 0.3, -2, 7.25) else RVec3.init(1.5, -2, 7.25);
+    const key: CharacterBoundsCache.Key = .{ .position = t, .rotation = Quat.identity(), .shape = shape, .shape_offset = Vec3.zero(), .up = Vec3.axisY(), .character_padding = 0 };
+    cache.store(&key, RMat44.rotationTranslation(Quat.identity(), t));
+    for ([_]Real{ 0, -0.0, 3, -1.0e30, std.math.inf(Real), std.math.nan(Real) }) |w| {
+        var base_offset = RVec3.init(0.5, 0.25, -3);
+        base_offset.value[3] = w;
+        const expected = cache.m.center_of_mass_transform.postTranslatedRVec3(base_offset.negate()).toMat44().getTranslation();
+        const got = cache.translation2(base_offset);
+        for (0..3) |i| try expectEqual(@as(u32, @bitCast(expected.getComponent(@intCast(i)))), @as(u32, @bitCast(got.getComponent(@intCast(i)))));
+        const jolt_w: u32 = @bitCast(expected.value[3]);
+        const got_w: u32 = @bitCast(got.value[3]);
+        try expectEqual(@as(u32, @bitCast(expected.getZ())), jolt_w);
+        if (Core.double_precision) {
+            try expectEqual(jolt_w, got_w);
+        } else {
+            try expectEqual(@as(u32, @bitCast(t.getZ() + (0 - w))), got_w);
+        }
+    }
+}
+
+/// A vector of zeros with the signs of the bits 0, 1, 2 of `mask` on x, y, z (W = Z)
+fn zeroSigns(mask: usize) RVec3 {
+    const z = [2]Real{ 0.0, -0.0 };
+    return RVec3.init(z[mask & 1], z[(mask >> 1) & 1], z[(mask >> 2) & 1]);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1078,6 +1184,59 @@ test "CharacterBoundsCache T3: a translation that is not finite runs Jolt's GetW
     }
 }
 
+test "CharacterBoundsCache T3: a base offset whose W differs from its Z gives Jolt's hits (the counters may differ)" {
+    // `translation2` has Jolt's X, Y and Z for any base offset, but in single precision its W is
+    // `translation.Z + (0 - base_offset.W)`. W reaches only the finite test of the replay: a finite W changes nothing,
+    // an infinite or NaN W sends every pair with a cache to the non_finite fallback (Jolt's GetWorldSpaceBounds). In
+    // double precision W is Jolt's. The hits and the accept decisions equal the oracle's in every case, and so do the
+    // rejected and accepted counts of the same queries with W = Z.
+    var context: PhysicsTestContext = undefined;
+    try context.init(allocator, .{});
+    defer context.deinit();
+    var shapes: Shapes = .{};
+    defer shapes.deinit();
+    var random = Random.init(0x3e57);
+    var supported = try supportedShapes(&shapes, &random);
+    defer supported.deinit(allocator);
+    var crowd: Crowd = undefined;
+    crowd.init(&context);
+    defer crowd.deinit();
+    const center = crowdCenter(true);
+    try addRandomCrowd(&crowd, &random, supported.items, 30, center, 2.5);
+    var num_hits: u32 = 0;
+    for (crowd.characters.items, 0..) |c, i| {
+        const z_base_offset = if (i % 2 == 0) c.getPosition() else c.getCenterOfMassTransform().getTranslation();
+        const direction = random.vec3(-1, 1).mulScalar(random.float(0.1, 2.0));
+        // W = Z: the counts of reference
+        var stats_z: Stats = undefined;
+        {
+            const before = crowd.stats;
+            num_hits += try expectCollideEqualsOracle(&crowd, c, 0.1, z_base_offset, std.math.maxInt(u32));
+            num_hits += try expectCastEqualsOracleAt(&crowd, c, direction, 0.02, std.math.maxInt(u32), z_base_offset);
+            inline for (std.meta.fields(Stats)) |f| @field(stats_z, f.name) = @field(crowd.stats, f.name) - @field(before, f.name);
+            try expectEqual(@as(u64, 0), stats_z.non_finite);
+            try expectEqual(@as(u64, 0), stats_z.stale);
+            try expect(stats_z.rejected + stats_z.accepted == 2 * (crowd.characters.items.len - 1));
+        }
+        for ([_]Real{ -0.0, 0.5, -3.0e5, std.math.inf(Real), -std.math.inf(Real), std.math.nan(Real) }) |w| {
+            var base_offset = z_base_offset;
+            base_offset.value[3] = w;
+            const before = crowd.stats;
+            num_hits += try expectCollideEqualsOracle(&crowd, c, 0.1, base_offset, std.math.maxInt(u32));
+            num_hits += try expectCastEqualsOracleAt(&crowd, c, direction, 0.02, std.math.maxInt(u32), base_offset);
+            try expectEqual(stats_z.rejected, crowd.stats.rejected - before.rejected);
+            try expectEqual(stats_z.accepted, crowd.stats.accepted - before.accepted);
+            const non_finite = crowd.stats.non_finite - before.non_finite;
+            if (!Core.double_precision and !std.math.isFinite(w)) {
+                try expectEqual(stats_z.rejected + stats_z.accepted, non_finite); // Every pair took Jolt's bounds
+            } else {
+                try expectEqual(@as(u64, 0), non_finite);
+            }
+        }
+    }
+    try expect(num_hits > 0);
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // T4: staleness
 
@@ -1194,6 +1353,57 @@ test "CharacterBoundsCache T4: a freed shape address cannot be reused while it i
     c.refreshBoundsCache(); // Releases the small box
 }
 
+/// T4: the queries of `q` in a crowd of two (one pair per query, with the cache of the other character `c`): the hits
+/// and decisions equal the oracle's, and the cache of `c` rejected (or accepted) the pair of the collide and the cast
+fn expectCachedPairOfQueries(crowd: *Crowd, q: *const CharacterVirtual, c: *const CharacterVirtual, rejected: bool) !void {
+    try expectEqual(CharacterBoundsCache.Find.valid, c.bounds_cache.find(&c.boundsCacheKey()));
+    const before = crowd.stats;
+    _ = try expectCollideEqualsOracle(crowd, q, 0.1, q.getPosition(), std.math.maxInt(u32));
+    _ = try expectCastEqualsOracle(crowd, q, Vec3.init(-1.5, -0.2, 0.4), 0, std.math.maxInt(u32));
+    try expectEqual(before.stale, crowd.stats.stale);
+    try expectEqual(before.rejected + @as(u64, if (rejected) 2 else 0), crowd.stats.rejected);
+    try expectEqual(before.accepted + @as(u64, if (rejected) 0 else 2), crowd.stats.accepted);
+}
+
+test "CharacterBoundsCache T4: a refresh across a reject boundary moves the cached translation" {
+    var context: PhysicsTestContext = undefined;
+    try context.init(allocator, .{});
+    defer context.deinit();
+    var shapes: Shapes = .{};
+    defer shapes.deinit();
+    const capsule = try shapes.rotatedTranslated(try shapes.capsule(0.5, 0.3), Vec3.init(0, 0.8, 0), Quat.identity());
+    var crowd: Crowd = undefined;
+    crowd.init(&context);
+    defer crowd.deinit();
+    const c = try crowd.add(capsule, RVec3.init(0, 0, 0), Quat.identity(), .{});
+    const q = try crowd.add(capsule, RVec3.init(0.7, 0, 0), Quat.identity(), .{});
+
+    // Overlapping: the queries of q accept c (the cast goes from q towards c)
+    try expectCachedPairOfQueries(&crowd, q, c, false);
+
+    // Each refresh below keeps the cache valid (valid to valid) and moves c across the reject boundary, separated from
+    // q (on the side the cast leaves) or overlapping it again. The decisions read the cached translation
+    // (`translation2`): a refresh that kept the old one would give the old decision, not the oracle's
+    c.setPosition(RVec3.init(5, 0, 0));
+    try expectCachedPairOfQueries(&crowd, q, c, true);
+    c.setPosition(RVec3.init(0, 0, 0));
+    try expectCachedPairOfQueries(&crowd, q, c, false);
+
+    // A direct write (the stored state stays .valid) and refreshBoundsCache
+    c.position = RVec3.init(5, 0, 0);
+    c.refreshBoundsCache();
+    try expectCachedPairOfQueries(&crowd, q, c, true);
+    c.position = RVec3.init(0, 0, 0);
+    c.refreshBoundsCache();
+    try expectCachedPairOfQueries(&crowd, q, c, false);
+
+    // setShapeOffset moves the center of mass without moving the position
+    c.setShapeOffset(Vec3.init(5, 0, 0));
+    try expectCachedPairOfQueries(&crowd, q, c, true);
+    c.setShapeOffset(Vec3.zero());
+    try expectCachedPairOfQueries(&crowd, q, c, false);
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // T5: MutableCompoundShape
 
@@ -1264,4 +1474,285 @@ test "CharacterBoundsCache: the refresh points of Update, restore and destructio
 
     // The pin holds one reference per character, the destructor releases it (the testing allocator finds a leak)
     try expectEqual(@as(u32, 5), capsule.getRefCount());
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Phase 14: the pin, `find`, the layout
+
+/// A key at `position` with `shape` (identity rotation, no shape offset, up Y, no padding)
+fn testKey(shape: ?*const Shape, position: RVec3) CharacterBoundsCache.Key {
+    return .{ .position = position, .rotation = Quat.identity(), .shape = shape, .shape_offset = Vec3.zero(), .up = Vec3.axisY(), .character_padding = 0 };
+}
+
+/// A center of mass transform for `store` (the cache does not check that it is GetCenterOfMassTransform of the key)
+fn testTransform(key: *const CharacterBoundsCache.Key) RMat44 {
+    return RMat44.rotationTranslation(key.rotation, key.position);
+}
+
+/// The reference count of each shape of `list` is `base` plus `delta`
+fn expectRefs(list: []const *const Shape, base: []const u32, delta: []const u32) !void {
+    for (list, base, delta) |s, b, d| try expectEqual(b + d, s.getRefCount());
+}
+
+test "CharacterBoundsCache: the references of the pin balance (store, deinit, refresh points, setShape, destruction)" {
+    // The pin is a raw pointer whose references `setPin` changes with RefConst.set: the stored shape has exactly one
+    // reference from the cache (also an unsupported one, none for a null shape), a refresh with the same shape takes no
+    // second one, and deinit gives it back (twice is harmless). The testing allocator fails the test on a leaked shape
+    // and on a double free. Runs in both precisions (`zig build test` and `-Ddouble_precision=true`).
+    var shapes: Shapes = .{};
+    defer shapes.deinit();
+    const sphere = try shapes.sphere(0.5);
+    const capsule = try shapes.rotatedTranslated(try shapes.capsule(0.5, 0.3), Vec3.init(0, 0.8, 0), Quat.identity());
+    const compound = try shapes.staticCompound(sphere, capsule); // Unsupported, and it holds references to both
+    const list = [_]*const Shape{ sphere, capsule, compound };
+    var base: [3]u32 = undefined;
+    for (list, &base) |s, *b| b.* = s.getRefCount();
+
+    // A cache alone
+    {
+        var cache: CharacterBoundsCache = .{};
+        defer cache.deinit(); // After the explicit deinit below: does nothing
+        try expect(cache.m.shape == null and cache.m.state == .empty);
+        var key = testKey(sphere, RVec3.init(1, 2, 3));
+        cache.store(&key, testTransform(&key));
+        try expectEqual(CharacterBoundsCache.State.valid, cache.m.state);
+        try expectRefs(&list, &base, &.{ 1, 0, 0 });
+        key.position = RVec3.init(1, 2, 4); // Another key with the same shape: no second reference
+        cache.store(&key, testTransform(&key));
+        try expectRefs(&list, &base, &.{ 1, 0, 0 });
+        key.shape = capsule;
+        cache.store(&key, testTransform(&key));
+        try expectRefs(&list, &base, &.{ 0, 1, 0 });
+        key.shape = compound; // Unsupported: pinned too
+        cache.store(&key, null);
+        try expectEqual(CharacterBoundsCache.State.unsupported, cache.m.state);
+        try expectRefs(&list, &base, &.{ 0, 0, 1 });
+        key.shape = null; // No shape: no reference
+        cache.store(&key, null);
+        try expect(cache.m.shape == null);
+        try expectRefs(&list, &base, &.{ 0, 0, 0 });
+        key.shape = sphere;
+        cache.store(&key, testTransform(&key));
+        try expectRefs(&list, &base, &.{ 1, 0, 0 });
+        cache.deinit();
+        try expect(cache.m.shape == null and cache.m.state == .empty);
+        try expectRefs(&list, &base, &.{ 0, 0, 0 });
+        cache.deinit();
+        try expectRefs(&list, &base, &.{ 0, 0, 0 });
+    }
+
+    // The cache holds the last reference: replacing the shape and deinit destroy it (a missing release leaks it)
+    {
+        var cache: CharacterBoundsCache = .{};
+        defer cache.deinit();
+        const box = (try BoxShape.create(allocator, Vec3.replicate(0.4), .{ .convex_radius = 0.05 })).asShape();
+        var key = testKey(box, RVec3.init(0, 1, 0));
+        cache.store(&key, testTransform(&key));
+        try expectEqual(@as(u32, 1), box.getRefCount());
+        key.shape = sphere;
+        cache.store(&key, testTransform(&key)); // Destroys the box
+        try expectRefs(&list, &base, &.{ 1, 0, 0 });
+        const box2 = (try BoxShape.create(allocator, Vec3.replicate(0.2), .{ .convex_radius = 0.05 })).asShape();
+        key.shape = box2;
+        cache.store(&key, testTransform(&key));
+        try expectRefs(&list, &base, &.{ 0, 0, 0 });
+        try expectEqual(@as(u32, 1), box2.getRefCount());
+        cache.deinit(); // Destroys box2
+    }
+
+    // Characters: base.shape and the pin hold one reference each
+    {
+        var context: PhysicsTestContext = undefined;
+        try context.init(allocator, .{});
+        defer context.deinit();
+        {
+            var crowd: Crowd = undefined;
+            crowd.init(&context);
+            defer crowd.deinit();
+            const c = try crowd.add(sphere, RVec3.init(0, 0, 0), Quat.identity(), .{});
+            try expectRefs(&list, &base, &.{ 2, 0, 0 });
+            c.refreshBoundsCache(); // The same key
+            c.setPosition(RVec3.init(0.5, 0, 0)); // A refresh point with the same shape
+            try expectEqual(CharacterBoundsCache.Find.valid, c.bounds_cache.find(&c.boundsCacheKey()));
+            try expectRefs(&list, &base, &.{ 2, 0, 0 });
+            // SetShape moves both references
+            const filters = .{ context.getSystem().getDefaultBroadPhaseLayerFilter(Layers.moving), context.getSystem().getDefaultLayerFilter(Layers.moving) };
+            const temp = context.temp_allocator.tempAllocator();
+            try expect(try c.setShape(capsule, std.math.floatMax(f32), &filters[0].base, &filters[1].base, &.{}, null, temp));
+            try expectRefs(&list, &base, &.{ 0, 2, 0 });
+            // A direct write: the pin keeps the old shape until the next refresh point
+            c.base.shape.set(compound);
+            try expectRefs(&list, &base, &.{ 0, 1, 1 });
+            c.refreshBoundsCache();
+            try expectEqual(CharacterBoundsCache.Find.unsupported, c.bounds_cache.find(&c.boundsCacheKey()));
+            try expectRefs(&list, &base, &.{ 0, 0, 2 });
+            // A second character with the same shape: 2 more
+            _ = try crowd.add(compound, RVec3.init(3, 0, 0), Quat.identity(), .{});
+            try expectRefs(&list, &base, &.{ 0, 0, 4 });
+            try expect(try c.setShape(sphere, std.math.floatMax(f32), &filters[0].base, &filters[1].base, &.{}, null, temp));
+            try expectRefs(&list, &base, &.{ 2, 0, 2 });
+        }
+        // The destructors released every reference
+        try expectRefs(&list, &base, &.{ 0, 0, 0 });
+    }
+}
+
+test "CharacterBoundsCache: find in every state, the key compared bit for bit" {
+    var shapes: Shapes = .{};
+    defer shapes.deinit();
+    const sphere = try shapes.sphere(0.5);
+    const capsule = try shapes.capsule(0.5, 0.3);
+    var cache: CharacterBoundsCache = .{};
+    defer cache.deinit();
+    const key = testKey(sphere, RVec3.init(1, 0, 3));
+    try expectEqual(CharacterBoundsCache.Find.stale, cache.find(&key)); // Empty
+    try expect(cache.needsRefresh(&key));
+
+    // Keys that differ in one member, also only in the sign of a zero or in the bits of a NaN
+    var others: [9]CharacterBoundsCache.Key = @splat(key);
+    others[0].position = RVec3.init(1, -0.0, 3);
+    others[1].position = RVec3.init(@bitCast(@as(if (Core.double_precision) u64 else u32, @bitCast(@as(Real, 1))) + 1), 0, 3);
+    others[2].rotation = Quat.init(-0.0, 0, 0, 1);
+    others[3].shape = capsule;
+    others[4].shape_offset = Vec3.init(0, -0.0, 0);
+    others[5].up = Vec3.init(0, 1, -0.0);
+    others[6].character_padding = -0.0;
+    others[7].character_padding = std.math.nan(f32);
+    others[8].character_padding = @bitCast(@as(u32, @bitCast(std.math.nan(f32))) | 1);
+    for ([_]bool{ true, false }) |supported| {
+        cache.store(&key, if (supported) testTransform(&key) else null);
+        const same: CharacterBoundsCache.Find = if (supported) .valid else .unsupported;
+        try expectEqual(same, cache.find(&key));
+        try expect(!cache.needsRefresh(&key));
+        for (others) |other| {
+            try expectEqual(CharacterBoundsCache.Find.stale, cache.find(&other));
+            try expect(cache.needsRefresh(&other));
+        }
+        // A NaN padding equals the same NaN (bit for bit), not another one
+        cache.store(&others[7], if (supported) testTransform(&others[7]) else null);
+        try expectEqual(same, cache.find(&others[7]));
+        try expectEqual(CharacterBoundsCache.Find.stale, cache.find(&others[8]));
+        try expectEqual(CharacterBoundsCache.Find.stale, cache.find(&key));
+    }
+    cache.deinit();
+    try expectEqual(CharacterBoundsCache.Find.stale, cache.find(&others[7])); // Empty again
+    // deinit keeps the stored members but the shape (null): a key that equals them is stale too, the state decides
+    try expect(cache.m.shape == null and cache.m.state == .empty);
+    var null_shape = others[7];
+    null_shape.shape = null;
+    try expectEqual(CharacterBoundsCache.Find.stale, cache.find(&null_shape));
+    try expect(cache.needsRefresh(&null_shape));
+}
+
+test "CharacterBoundsCache: CharacterVirtual and its cache are 64 byte aligned (created, embedded, on the stack)" {
+    comptime {
+        std.debug.assert(@alignOf(CharacterVirtual) == 64);
+        std.debug.assert(@offsetOf(CharacterVirtual, "bounds_cache") == 0);
+    }
+    var context: PhysicsTestContext = undefined;
+    try context.init(allocator, .{});
+    defer context.deinit();
+    var shapes: Shapes = .{};
+    defer shapes.deinit();
+    const capsule = try shapes.rotatedTranslated(try shapes.capsule(0.5, 0.3), Vec3.init(0, 0.8, 0), Quat.identity());
+    const Check = struct {
+        fn aligned(c: *const CharacterVirtual) !void {
+            try expectEqual(@as(usize, 0), @intFromPtr(c) % 64);
+            try expectEqual(@as(usize, 0), @intFromPtr(&c.bounds_cache) % 64);
+            try expectEqual(@as(usize, 0), @intFromPtr(&c.bounds_cache.m.position) % 64); // The stored key vectors
+            try expectEqual(@as(usize, 0), @intFromPtr(&c.bounds_cache.m.replay) % 64); // The head of the replay
+        }
+    };
+
+    // Created (allocator.create), several sizes of allocation in between
+    var crowd: Crowd = undefined;
+    crowd.init(&context);
+    defer crowd.deinit();
+    for (0..5) |i| {
+        const filler = try allocator.alloc(u8, 8 + 24 * i);
+        defer allocator.free(filler);
+        try Check.aligned(try crowd.add(capsule, RVec3.init(@floatFromInt(i), 0, 0), Quat.identity(), .{}));
+    }
+
+    var settings = CharacterVirtualSettings.init(allocator);
+    defer settings.deinit();
+    settings.base.shape.set(capsule);
+
+    // Embedded in another struct on the heap
+    const Holder = struct { flag: u8, character: CharacterVirtual };
+    const holder = try allocator.create(Holder);
+    defer allocator.destroy(holder);
+    try holder.character.initInPlace(allocator, &settings, RVec3.init(0, 0, 5), Quat.identity(), 0, context.getSystem());
+    holder.character.base.setEmbedded();
+    defer holder.character.base.deinit();
+    try Check.aligned(&holder.character);
+
+    // On the stack
+    var on_stack = try CharacterVirtual.init(allocator, &settings, RVec3.init(0, 0, 10), Quat.identity(), 0, context.getSystem());
+    on_stack.base.setEmbedded();
+    defer on_stack.base.deinit();
+    try Check.aligned(&on_stack);
+}
+
+/// The number of cache lines of a CharacterVirtual that a rejected pair of CharacterVsCharacterCollisionSimple reads,
+/// with a valid cache whose replay has `num_values` tail values and `num_addends` addends: the live members of the key,
+/// the stored key, the state, the cached translation and the replay (CharacterBoundsCache.zig, Layout)
+fn rejectedPairLines(num_values: usize, num_addends: usize) u32 {
+    const Layout = CharacterBoundsCache.Layout;
+    const cache = @offsetOf(CharacterVirtual, "bounds_cache") + @offsetOf(CharacterBoundsCache, "m");
+    const replay = cache + @offsetOf(Layout, "replay");
+    const base = @offsetOf(CharacterVirtual, "base");
+    const ranges = [_][2]usize{
+        // The live members (CharacterVirtual.boundsCacheKey; the loops read the shape and the padding again)
+        .{ @offsetOf(CharacterVirtual, "position"), @sizeOf(RVec3) },
+        .{ @offsetOf(CharacterVirtual, "rotation"), @sizeOf(Quat) },
+        .{ base + @offsetOf(zolt.CharacterBase, "shape"), @sizeOf(RefConst(Shape)) },
+        .{ @offsetOf(CharacterVirtual, "shape_offset"), @sizeOf(Vec3) },
+        .{ base + @offsetOf(zolt.CharacterBase, "up"), @sizeOf(Vec3) },
+        .{ @offsetOf(CharacterVirtual, "character_padding"), @sizeOf(f32) },
+        // The cache: the stored key, the state, the translation
+        .{ cache + @offsetOf(Layout, "position"), @sizeOf(RVec3) },
+        .{ cache + @offsetOf(Layout, "rotation"), @sizeOf(Quat) },
+        .{ cache + @offsetOf(Layout, "shape"), @sizeOf(?*const Shape) },
+        .{ cache + @offsetOf(Layout, "shape_offset"), @sizeOf(Vec3) },
+        .{ cache + @offsetOf(Layout, "up"), @sizeOf(Vec3) },
+        .{ cache + @offsetOf(Layout, "character_padding"), @sizeOf(f32) },
+        .{ cache + @offsetOf(Layout, "state"), @sizeOf(CharacterBoundsCache.State) },
+        .{ cache + @offsetOf(Layout, "translation"), @sizeOf(RVec3) },
+        // The replay
+        .{ replay + @offsetOf(Replay, "tail"), 1 },
+        .{ replay + @offsetOf(Replay, "num_addends"), 1 },
+        .{ replay + @offsetOf(Replay, "v"), num_values * @sizeOf(Vec3) },
+        .{ replay + @offsetOf(Replay, "addends"), num_addends * @sizeOf(Vec3) },
+    };
+    var lines: u64 = 0;
+    for (ranges) |r| {
+        if (r[1] == 0) continue;
+        for (r[0] / 64..(r[0] + r[1] - 1) / 64 + 1) |line| lines |= @as(u64, 1) << @intCast(line);
+    }
+    return @popCount(lines);
+}
+
+test "CharacterBoundsCache: the cache lines that a rejected pair reads, per shape" {
+    // The layout of CharacterBoundsCache.zig (Layout) and CharacterVirtual's comptime block, as line counts (Phase 13's
+    // layout: 9 for a capsule in single precision). On a 32 bit target the pointers move the members: not pinned there
+    if (@sizeOf(usize) != 8) return error.SkipZigTest;
+    const Case = struct { name: []const u8, values: usize, addends: usize, single: u32, double: u32 };
+    const cases = [_]Case{
+        .{ .name = "sphere", .values = 2, .addends = 0, .single = 6, .double = 8 },
+        .{ .name = "capsule", .values = 3, .addends = 0, .single = 6, .double = 8 },
+        .{ .name = "tapered capsule", .values = 4, .addends = 0, .single = 7, .double = 9 },
+        .{ .name = "box, cylinder, convex hull (transformed)", .values = 6, .addends = 0, .single = 7, .double = 9 },
+        .{ .name = "capsule in an OffsetCenterOfMassShape", .values = 3, .addends = 1, .single = 7, .double = 9 },
+        .{ .name = "capsule in two OffsetCenterOfMassShapes", .values = 3, .addends = 2, .single = 8, .double = 10 },
+        .{ .name = "transformed in two OffsetCenterOfMassShapes", .values = 6, .addends = 2, .single = 8, .double = 10 },
+    };
+    for (cases) |case| {
+        const expected = if (Core.double_precision) case.double else case.single;
+        const lines = rejectedPairLines(case.values, case.addends);
+        if (lines != expected) {
+            std.debug.print("{s}: {d} cache lines, expected {d}\n", .{ case.name, lines, expected });
+            return error.TestUnexpectedResult;
+        }
+    }
 }

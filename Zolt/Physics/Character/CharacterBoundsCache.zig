@@ -20,14 +20,18 @@
 //!   the public fields, CharacterBase.setUp, `base.shape.set`, the in place position of MoveShape before its
 //!   UpdateInnerBodyTransform, an error between a write and a refresh) makes the cache stale, and the loop runs Jolt's
 //!   code for that pair. So the refresh points only decide how often the cache hits, never a result.
-//! - **Shape.** The cache holds a reference to the shape of its stored key (`pin`), so that the address cannot be freed
-//!   and reused by another shape while the key compares it. Every stored key holds it, whatever the shape (a supported
-//!   or an unsupported one, see `store`), for as long as it is the stored key: the reference count of a shape
+//! - **Shape.** The cache holds a reference to the shape of its stored key (the pin, `m.shape`), so that the address
+//!   cannot be freed and reused by another shape while the key compares it. The cache is an extern struct (Layout
+//!   below), which cannot hold a RefConst, so the pin is a raw pointer whose references are taken and released by hand,
+//!   in one place (`setPin`), with RefConst's own code: RefConst.set on a view of the pointer (a reference to the new
+//!   shape first, then the old one released; nothing when the shape is the same). `store` points the pin to the shape
+//!   of every key it stores, `deinit` to null. Every stored key holds it, whatever the shape (a supported or an
+//!   unsupported one, see `store`), for as long as it is the stored key: the reference count of a shape
 //!   (Shape.getRefCount) is higher than in Jolt by the number of character caches that hold it (each character has its
 //!   own cache, so a shape that N characters share counts N more), and after a direct write to `base.shape` the old
-//!   shape stays alive until the next refresh point or the destructor. The values are only cached when the shape cannot change
-//!   them after its creation (`CharacterBoundsCache.supportedShape`): the convex shapes sphere, box, capsule, tapered
-//!   capsule, cylinder, tapered cylinder and convex hull, and RotatedTranslatedShape, ScaledShape and
+//!   shape stays alive until the next refresh point or the destructor. The values are only cached when the shape
+//!   cannot change them after its creation (`CharacterBoundsCache.supportedShape`): the convex shapes sphere, box,
+//!   capsule, tapered capsule, cylinder, tapered cylinder and convex hull, and RotatedTranslatedShape, ScaledShape and
 //!   OffsetCenterOfMassShape around them (at most `max_decorator_depth` levels). Everything else is unsupported and
 //!   takes Jolt's code: compounds (a MutableCompoundShape changes in place), meshes, height fields, triangles, planes,
 //!   empty shapes, soft body shapes and user shapes. A null shape is never cached (and holds no reference).
@@ -35,15 +39,20 @@
 //!   SetShapeOffset, Update, MoveToContact), SetShape (on every exit) and RestoreState (also on its error path). A
 //!   refresh with an unchanged key does nothing. `deinit` releases the reference (the destructor of the character).
 //! - **The center of mass transform.** The cached transform is the value GetCenterOfMassTransform() returns for the
-//!   key: the same function of the same bits. The loops compute `transform2 = PostTranslated(-inBaseOffset).ToMat44()`
-//!   from it with Jolt's code, and pass that transform to the collision / cast of an accepted pair. A rotation that is
-//!   not normalized is not cached (Jolt's Mat44::sRotation asserts on it), so a refresh never asserts where Jolt would
-//!   not; neither does a replay (it checks the IsValidScale and rotation asserts of the shapes it replays).
+//!   key: the same function of the same bits. Jolt's loops build `transform2 = PostTranslated(-inBaseOffset).ToMat44()`
+//!   for every pair, but the bounds replay reads only its translation. So with a valid cache the loops compute just
+//!   that translation (`translation2`, from the cached `translation`: Jolt's bits in X, Y and Z, see translation2 for
+//!   W), and build transform2 with Jolt's code only where Jolt's transform2 is used: for an accepted pair (the
+//!   collision / cast gets it, from the cached transform), and, from the cached or the live transform, for a stale or
+//!   unsupported cache and before Jolt's GetWorldSpaceBounds on the non finite path. A rotation that is not normalized
+//!   is not cached (Jolt's Mat44::sRotation asserts on it), so a refresh never asserts where Jolt would not; neither
+//!   does a replay (it checks the IsValidScale and rotation asserts of the shapes it replays).
 //! - **The bounds replay.** The loops only need the world space bounds `shape2.GetWorldSpaceBounds(transform2,
 //!   Vec3::sOne())` for their reject decision. For a supported chain these are a fixed sequence of float operations on
 //!   the rotation columns c0, c1, c2 of transform2 (the cached bits), its translation t (`transform2.GetTranslation()`,
-//!   Jolt's bits) and constants of the shapes. `Replay.build` evaluates, once per refresh, every operation that does not
-//!   involve t; `Replay.bounds` evaluates, per pair, the operations that do, in Jolt's order and association:
+//!   Jolt's bits in X, Y and Z, from `translation2`) and constants of the shapes. `Replay.build` evaluates, once per
+//!   refresh, every operation that does not involve t; `Replay.bounds` evaluates, per pair, the operations that do, in
+//!   Jolt's order and association:
 //!   - OffsetCenterOfMassShape: `T + M.Multiply3x3(-scale * offset)` (PreTranslated), the addends in chain order;
 //!   - SphereShape: `-half_extent + T`, `half_extent + T` (AABox::Translate);
 //!   - CapsuleShape and TaperedCapsuleShape: `M * v` is `Multiply3x3(v) + T` lane by lane, then Jolt's min / max and
@@ -77,12 +86,34 @@
 //!      with `>= 0` is true for both signs, and a NaN that the direction brings in arises in both computations alike).
 //!      Their answers depend only on real values and on which values are NaN, so the reject / accept decision is
 //!      Jolt's. The box is never stored, returned or passed on.
+//! - **Layout (Roadmap Phase 14, class A, layout only).** With 100 characters the lines that the loops read of the other
+//!   characters do not stay in the L1 cache from one query to the next, so every cache line that a rejected pair reads
+//!   is a miss. Such a pair reads the key twice (the live members of the character and the stored copy), the state,
+//!   the cached translation and the head of the replay. The cache is therefore an extern struct with a field order per
+//!   precision (`SingleLayout`, `DoubleLayout`, offsets asserted at compile time), and CharacterVirtual holds it
+//!   `align(64)`: Zig's auto layout puts the most aligned field first, so the cache is at offset 0 and the character
+//!   is 64 byte aligned. CharacterVirtual's comptime block pins where its own members land behind the cache. For a
+//!   sphere or a capsule (also inside RotatedTranslatedShape / ScaledShape, like PerformanceTest's characters), a
+//!   rejected pair reads 6 cache lines of the other character in single precision (Phase 13's layout: 9):
+//!   - [0, 64): the stored position, rotation, shape offset and up;
+//!   - [64, 128): the head of the replay (`tail`, `num_addends`, `v[0..2]`);
+//!   - [320, 384): shape, padding, state and translation of the cache (the 352 byte cache ends there), together with
+//!     CharacterBase.up, which the compare reads anyway;
+//!   - CharacterBase.shape; rotation, position and shape offset (one line); the character padding.
+//!   In double precision RVec3 is 32 bytes and no line can be shared: the cache reads [0, 192), the character's members
+//!   5 more lines, 8 in all. The gain depends on the shape: a tapered capsule and the transformed tail (box, cylinder,
+//!   tapered cylinder, convex hull) read `v[3..5]` from the next replay line, and OffsetCenterOfMassShape addends one or
+//!   two lines more (CharacterBoundsCacheTests counts them). A new member of CharacterBase or CharacterVirtual, or a
+//!   compiler that orders the fields differently, fails to compile; PortingGuide.md section 5 ("Line pinned layouts")
+//!   says how to re-tune.
 //! - **Counters.** In test builds the loops count what the caches decided (`Stats`, through the optional
 //!   `CharacterVsCharacterCollisionSimple.stats` pointer); in other builds the counters are `void`.
 //! - **Tests.** ZoltTests/Physics/CharacterBoundsCacheTests.zig (the replay against GetWorldSpaceBounds, the decisions
-//!   at their flips and on boxes that differ only in the signs of zeros (fact 5), the Simple against an oracle copy of
-//!   Jolt's loops (the hits and the accept decisions, also through the `non_finite` fallback), staleness, the pin,
-//!   MutableCompoundShape) and the SimulationParity scenes character_virtual_vs_character_changes and
+//!   at their flips and on boxes that differ only in the signs of zeros (fact 5), `translation2` against Jolt's
+//!   transform2 bit for bit (signed zeros, roundings, a base offset whose W differs from its Z), the Simple against an
+//!   oracle copy of Jolt's loops (the hits and the accept decisions, also through the `non_finite` fallback),
+//!   staleness, the pin and its reference counts, `find` in every state, the alignment and the cache lines of the
+//!   layout, MutableCompoundShape) and the SimulationParity scenes character_virtual_vs_character_changes and
 //!   character_virtual_vs_character_changes_far.
 
 const std = @import("std");
@@ -133,12 +164,13 @@ const KeyType = struct {
     up: Vec3,
     character_padding: f32,
 
-    /// Bit for bit comparison (NaN equals NaN with the same bits, -0 differs from +0): the bits that differ, or'ed together
+    /// Bit for bit comparison (NaN equals NaN with the same bits, -0 differs from +0): the shape addresses, the bits of
+    /// the padding, and the bits that differ in the vectors, or'ed together and tested as one 128 bit integer
     pub fn eql(a: *const KeyType, b: *const KeyType) bool {
-        const padding_diff = @as(u32, @bitCast(a.character_padding)) ^ @as(u32, @bitCast(b.character_padding));
         const diff = bitsDiff(a.position.value, b.position.value) | bitsDiff(a.rotation.value.value, b.rotation.value.value) |
-            bitsDiff(a.shape_offset.value, b.shape_offset.value) | bitsDiff(a.up.value, b.up.value) | @as(@Vector(4, u32), @splat(padding_diff));
-        return a.shape == b.shape and @reduce(.Or, diff) == 0;
+            bitsDiff(a.shape_offset.value, b.shape_offset.value) | bitsDiff(a.up.value, b.up.value);
+        return a.shape == b.shape and @as(u32, @bitCast(a.character_padding)) == @as(u32, @bitCast(b.character_padding)) and
+            @as(u128, @bitCast(diff)) == 0;
     }
 };
 
@@ -156,7 +188,7 @@ inline fn bitsDiff(a: anytype, b: @TypeOf(a)) @Vector(4, u32) {
 }
 
 /// The state of a cache
-pub const State = enum(u8) {
+const StateType = enum(u8) {
     /// Never refreshed (or deinitialized): every read is stale
     empty,
     /// The key is stored, but its shape or rotation is not supported: Jolt's code runs
@@ -179,7 +211,10 @@ fn innerShape(shape: *const Shape) ?*const Shape {
 /// the translation of `inCenterOfMassTransform`, for one rotation: everything that does not depend on the translation
 /// is computed once (`build`), the operations that involve it run per pair (`bounds`) in Jolt's order. See the file
 /// header for why the result equals Jolt's as real numbers.
-const ReplayType = struct {
+///
+/// An extern struct (a member of the extern cache layouts) with `tail`, `num_addends` and `v` first: the part that a
+/// sphere or a capsule reads, `tail` to `v[2]`, is its first 64 bytes, one cache line (file header, Layout).
+const ReplayType = extern struct {
     /// The most OffsetCenterOfMassShapes in a chain of decorated shapes
     pub const max_addends = 2;
 
@@ -198,12 +233,13 @@ const ReplayType = struct {
     };
 
     tail: Tail,
-    /// The translations that OffsetCenterOfMassShape::GetWorldSpaceBounds adds (PreTranslated: T + M.Multiply3x3(-scale
-    /// * offset)), in chain order
+    /// The number of `addends`
     num_addends: u8,
-    addends: [max_addends]Vec3,
     /// The values of the tail
     v: [6]Vec3,
+    /// The translations that OffsetCenterOfMassShape::GetWorldSpaceBounds adds (PreTranslated: T + M.Multiply3x3(-scale
+    /// * offset)), in chain order
+    addends: [max_addends]Vec3,
 
     /// Compute the parts of the bounds of `shape_in` that do not depend on the translation, for a center of mass
     /// transform with the rotation columns of `rotation` (its translation is ignored). Returns false for an unsupported
@@ -355,41 +391,143 @@ fn rotationColumns(transform: RMat44) Mat44 {
     return .init(transform.col[0], transform.col[1], transform.col[2], Vec4.init(0, 0, 0, 1));
 }
 
-/// The cache of one character (`CharacterVirtual.bounds_cache`)
-pub const CharacterBoundsCache = struct {
-    pub const Stats = StatsType;
-    pub const Key = KeyType;
-    pub const Replay = ReplayType;
+/// The members of a cache in single precision, in a fixed order (an extern struct; the offsets are asserted below), so
+/// that a rejected pair of the loops of CharacterVsCharacterCollisionSimple reads few cache lines (file header, Layout).
+/// CharacterVirtual holds the cache 64 byte aligned at its offset 0 (`bounds_cache`). A rejected pair with a valid cache
+/// reads:
+/// - [0, 64): the stored `position`, `rotation`, `shape_offset` and `up`;
+/// - [64, 128): the head of the replay, `tail` to `v[2]` (a sphere or a capsule reads no more of it);
+/// - [320, 352): `shape`, `character_padding`, `state` and `translation`. The cache is 352 bytes (32 mod 64, set by
+///   `reserved`), so this block shares the line [320, 384) with CharacterBase.up at offset 352 of CharacterVirtual,
+///   which the key compare reads too, and CharacterVirtual's rotation, position and shape offset, which Zig's layout
+///   puts behind the cache, share one line (see CharacterVirtual's comptime block).
+const SingleLayout = extern struct {
+    /// The key of the stored values (undefined while `state` is `.empty`; its shape is `shape`)
+    position: Vec3 = undefined,
+    rotation: Quat = undefined,
+    shape_offset: Vec3 = undefined,
+    up: Vec3 = undefined,
+    /// The world space bounds of the shape for the rotation of `center_of_mass_transform` (when `state` is `.valid`)
+    replay: ReplayType = undefined,
+    /// GetCenterOfMassTransform() of the character for the key (when `state` is `.valid`); the loops read it only for an
+    /// accepted pair
+    center_of_mass_transform: Mat44 = undefined,
+    /// Makes the cache 352 bytes: the block from `shape` to `translation` ends the cache (see above)
+    reserved: [48]u8 = undefined,
+    /// The shape of the key (the pin: it holds a reference, see `setPin`, so that the address is not reused while it is
+    /// cached; null when nothing is stored)
+    shape: ?*const Shape = null,
+    character_padding: f32 = undefined,
+    /// See CharacterBoundsCache.State
+    state: StateType = .empty,
+    /// `center_of_mass_transform.getTranslation()` (when `state` is `.valid`): `translation2` adds the negated base
+    /// offset to it
+    translation: Vec3 = undefined,
 
-    /// See State
-    state: State = .empty,
-    /// The key of the stored values (undefined while `state` is `.empty`; its shape is `pin`)
+    comptime {
+        std.debug.assert(@offsetOf(SingleLayout, "position") == 0 and @offsetOf(SingleLayout, "rotation") == 16 and @offsetOf(SingleLayout, "shape_offset") == 32 and @offsetOf(SingleLayout, "up") == 48);
+        std.debug.assert(@offsetOf(SingleLayout, "replay") == 64 and @offsetOf(ReplayType, "tail") == 0 and @offsetOf(ReplayType, "num_addends") == 1 and @offsetOf(ReplayType, "v") == 16);
+        std.debug.assert(@offsetOf(SingleLayout, "center_of_mass_transform") == 208 and @offsetOf(SingleLayout, "shape") == 320);
+        if (@sizeOf(usize) == 8) std.debug.assert(@offsetOf(SingleLayout, "character_padding") == 328 and @offsetOf(SingleLayout, "state") == 332);
+        std.debug.assert(@offsetOf(SingleLayout, "translation") == 336 and @sizeOf(SingleLayout) == 352);
+    }
+};
+
+/// The members of a cache in double precision (see SingleLayout). RVec3 is 32 bytes and CharacterBase starts with a
+/// DVec3, so no line can be shared with the character. A rejected pair with a valid cache reads [0, 64) the stored
+/// `position`, `rotation` and `shape_offset`; [64, 128) `up`, `shape`, `character_padding`, `state` and `translation`;
+/// [128, 192) the head of the replay, `tail` to `v[2]`.
+const DoubleLayout = extern struct {
+    /// The key of the stored values (undefined while `state` is `.empty`; its shape is `shape`)
     position: RVec3 = undefined,
     rotation: Quat = undefined,
     shape_offset: Vec3 = undefined,
     up: Vec3 = undefined,
+    /// The shape of the key (the pin: it holds a reference, see `setPin`, so that the address is not reused while it is
+    /// cached; null when nothing is stored)
+    shape: ?*const Shape = null,
     character_padding: f32 = undefined,
-    /// The shape of the key, with a reference so that its address is not reused while it is cached
-    pin: RefConst(Shape) = .empty,
-    /// GetCenterOfMassTransform() of the character for the key (when `state` is `.valid`)
-    center_of_mass_transform: RMat44 = undefined,
+    /// See CharacterBoundsCache.State
+    state: StateType = .empty,
+    /// `center_of_mass_transform.getTranslation()` (when `state` is `.valid`): `translation2` adds the negated base
+    /// offset to it
+    translation: RVec3 = undefined,
     /// The world space bounds of the shape for the rotation of `center_of_mass_transform` (when `state` is `.valid`)
     replay: ReplayType = undefined,
+    /// GetCenterOfMassTransform() of the character for the key (when `state` is `.valid`); the loops read it only for an
+    /// accepted pair
+    center_of_mass_transform: RMat44 = undefined,
+
+    comptime {
+        if (Core.double_precision) {
+            std.debug.assert(@offsetOf(DoubleLayout, "position") == 0 and @offsetOf(DoubleLayout, "rotation") == 32 and @offsetOf(DoubleLayout, "shape_offset") == 48);
+            std.debug.assert(@offsetOf(DoubleLayout, "up") == 64 and @offsetOf(DoubleLayout, "shape") == 80);
+            if (@sizeOf(usize) == 8) std.debug.assert(@offsetOf(DoubleLayout, "character_padding") == 88 and @offsetOf(DoubleLayout, "state") == 92);
+            std.debug.assert(@offsetOf(DoubleLayout, "translation") == 96 and @offsetOf(DoubleLayout, "replay") == 128 and @offsetOf(ReplayType, "v") == 16);
+            std.debug.assert(@sizeOf(DoubleLayout) == 384);
+        }
+    }
+};
+
+/// The cache of one character (`CharacterVirtual.bounds_cache`)
+pub const CharacterBoundsCache = extern struct {
+    pub const Stats = StatsType;
+    pub const Key = KeyType;
+    pub const State = StateType;
+    pub const Replay = ReplayType;
+    pub const Layout = if (Core.double_precision) DoubleLayout else SingleLayout;
+
+    /// The members, see SingleLayout and DoubleLayout
+    m: Layout = .{},
 
     /// Release the reference to the shape (the destructor of the character)
     pub fn deinit(self: *CharacterBoundsCache) void {
-        self.pin.deinit();
-        self.state = .empty;
+        self.setPin(null);
+        self.m.state = .empty;
+    }
+
+    /// Point the pin (`m.shape`) to `shape`, the one place that changes its references. The extern layout cannot hold a
+    /// RefConst(Shape), so this runs RefConst.set on a view of the raw pointer, which owns the pin's reference: a
+    /// reference to the new shape first, then the old one released (which can destroy it); nothing when they are the
+    /// same.
+    fn setPin(self: *CharacterBoundsCache, shape: ?*const Shape) void {
+        var pin: RefConst(Shape) = .{ .ptr = self.m.shape };
+        pin.set(shape);
+        self.m.shape = pin.ptr;
     }
 
     /// The stored key (`state` is not `.empty`)
     fn storedKey(self: *const CharacterBoundsCache) Key {
-        return .{ .position = self.position, .rotation = self.rotation, .shape = self.pin.get(), .shape_offset = self.shape_offset, .up = self.up, .character_padding = self.character_padding };
+        const m = &self.m;
+        return .{ .position = m.position, .rotation = m.rotation, .shape = m.shape, .shape_offset = m.shape_offset, .up = m.up, .character_padding = m.character_padding };
     }
 
     /// The key needs a refresh (it differs from the stored one, or nothing is stored)
     pub fn needsRefresh(self: *const CharacterBoundsCache, key: *const Key) bool {
-        return self.state == .empty or !self.storedKey().eql(key);
+        return self.m.state == .empty or !self.storedKey().eql(key);
+    }
+
+    /// The translation of the loops' `transform2 = center_of_mass_transform.postTranslatedRVec3(base_offset.negate())
+    /// .toMat44()`, computed without transform2 (`state` is `.valid`). It equals `transform2.getTranslation()` bit for
+    /// bit in X, Y and Z, and in W too when the W of `base_offset` equals its Z (every RVec3 that Vec3 / DVec3
+    /// arithmetic makes; only a vector built from raw lanes can differ):
+    /// - single precision: Mat44.postTranslated stores `getTranslation().add(base_offset.negate())` in column 3 with
+    ///   W = 1, toMat44 is the identity and getTranslation copies Z into W. `m.translation` is getTranslation() of the
+    ///   same cached transform (W = Z), so this is the same lane by lane addition of the same operands. Its W is
+    ///   `translation.Z + (0 - base_offset.W)`, which is Jolt's W, `translation.Z + (0 - base_offset.Z)`, when the W of
+    ///   base_offset equals its Z;
+    /// - double precision: DMat44.postTranslatedDVec3 adds the DVec3s, toMat44 rounds the sum with DVec3.toVec3 (one
+    ///   rounding to nearest per lane, then Z copied into W) and getTranslation copies Z into W again. Here the same
+    ///   addition and the same toVec3: all 4 lanes are Jolt's, whatever the W of base_offset.
+    /// The W lane reaches only the finite test of `Replay.bounds` and the W lanes of the box, which no decision reads
+    /// (AABox.overlaps and rayAABoxHitsDirection test X, Y and Z; ExpandBy works lane by lane). A W that is not finite
+    /// makes `bounds` return null, and the loop then runs Jolt's GetWorldSpaceBounds on Jolt's transform2: a W that
+    /// differs from Jolt's can change the counters (`non_finite`), never a decision or a result.
+    /// The negation is `0 - base_offset` (`negate`), as in Jolt: `m.translation.sub(base_offset)` would differ in the
+    /// sign of a zero sum (`-0 + (0 - 0) = +0`, `-0 - 0 = -0`).
+    pub inline fn translation2(self: *const CharacterBoundsCache, base_offset: RVec3) Vec3 {
+        const sum = self.m.translation.add(base_offset.negate());
+        return if (Core.double_precision) sum.toVec3() else sum;
     }
 
     /// A shape whose center of mass (and bounds) cannot change after its creation, see the file header
@@ -418,29 +556,37 @@ pub const CharacterBoundsCache = struct {
     /// Store `key` with its center of mass transform (GetCenterOfMassTransform() of the character for the key; null when
     /// `supports(key)` is false). The pin takes a reference to the shape of every stored key, also an unsupported one.
     pub fn store(self: *CharacterBoundsCache, key: *const Key, center_of_mass_transform: ?RMat44) void {
-        self.position = key.position;
-        self.rotation = key.rotation;
-        self.shape_offset = key.shape_offset;
-        self.up = key.up;
-        self.character_padding = key.character_padding;
-        self.pin.set(key.shape);
+        const m = &self.m;
+        m.position = key.position;
+        m.rotation = key.rotation;
+        m.shape_offset = key.shape_offset;
+        m.up = key.up;
+        m.character_padding = key.character_padding;
+        self.setPin(key.shape);
         if (center_of_mass_transform) |transform| {
-            if (self.replay.build(key.shape.?, rotationColumns(transform))) {
-                self.center_of_mass_transform = transform;
-                self.state = .valid;
+            if (m.replay.build(key.shape.?, rotationColumns(transform))) {
+                m.center_of_mass_transform = transform;
+                m.translation = transform.getTranslation();
+                m.state = .valid;
                 return;
             }
         }
-        self.state = .unsupported;
+        m.state = .unsupported;
     }
 
     /// The result of `find`
     pub const Find = enum { valid, stale, unsupported };
 
-    /// Can the loops use the stored values for a character whose current members are `key`
+    /// Can the loops use the stored values for a character whose current members are `key`: `.valid` when the state is
+    /// `.valid` and the key equals the stored one, `.unsupported` when the state is `.unsupported` and the key equals
+    /// the stored one, `.stale` otherwise (also for `.empty`, whose stored key is undefined)
     pub inline fn find(self: *const CharacterBoundsCache, key: *const Key) Find {
-        if (self.state == .empty or !self.storedKey().eql(key))
+        // `.valid` is tested first: it is the one result that the loops use (in other than test builds `.stale` and
+        // `.unsupported` take the same path, Jolt's code)
+        if (self.m.state == .valid)
+            return if (self.storedKey().eql(key)) .valid else .stale;
+        if (self.m.state == .empty or !self.storedKey().eql(key))
             return .stale;
-        return if (self.state == .valid) .valid else .unsupported;
+        return .unsupported;
     }
 };

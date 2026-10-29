@@ -59,6 +59,23 @@
 //!   ContactConstraintSimd.zig has the proof for every phase). Only in test builds, `simd_plans` counts the planned
 //!   batches and their velocity iterations with and without a plan in the word, and can turn the plans off (`void`
 //!   otherwise).
+//! - Differences with the C++ version (Phase 14, class A): a planned batch keeps the step constant data of its SIMD
+//!   groups in lane order for the step ("LaneGroups" in ContactConstraintSimd.zig has the proof). Its warm start claims
+//!   and builds its LaneGroups after planBatch (`claimSimdLanes`) and writes the batch's lane word
+//!   (`LargeIslandSplitter.batchLaneWord`); its velocity iterations solve from them when the word has the marker
+//!   (`ContactConstraintSimd.hasLanes`, solvePlannedLanes decodes and checks the rest of the word), and after its last
+//!   one the job writes the lambdas back before storeAppliedImpulses (writeBackLanes). The memory
+//!   is kept between updates, 480 bytes per lane (3,840 per group), in one heap block `contact_manager.simd_lanes` (in
+//!   the free bytes at the end of the manager: a field of PhysicsSystem would make Zig order PhysicsSystem's fields
+//!   differently): `update` grows it before it builds the jobs (`growSimdLanes`) to the demand of the steps of the
+//!   previous update (their claims, or `recordSimdLaneBound` for a step without a block) and at least to twice its
+//!   size. A growth whose allocation fails is not an error (Jolt has no such allocation): the old block stays and the
+//!   batches that find no room gather from the constraints with the same bits. Only that failure is silent: the block
+//!   is heap memory that Jolt does not have, from the system's allocator, so under a bounded allocator it can make a
+//!   later heap allocation fail that Jolt makes too (SimulationArchitecture.md D5). `releaseSimdLanes` frees it between
+//!   updates, `deinit` with the manager. The bump counter in the block's header (its own cache line) is reset in
+//!   jobFinalizeIslands. The jobs never allocate. In test builds `simd_plans.lanes` turns the LaneGroups off, limits the
+//!   growth and counts the claims, growths and steps over the bound.
 //!
 //! SimulationArchitecture D4 / D5 / D6 / D7:
 //! - `update` builds Jolt's complete job graph per collision step with Jolt's dependency counts, creation order and kick
@@ -426,8 +443,137 @@ pub const PhysicsSystem = struct {
 
     /// Zolt addition (Phase 13, class A), only in test builds (`void` otherwise): the SIMD plans of the batches of the
     /// parallel splits since `init` (ContactConstraintSimd.planBatch), and a switch that turns them off. The tests check
-    /// with it that the planned path runs in an update and gives the bits of the path without plans.
+    /// with it that the planned path runs in an update and gives the bits of the path without plans. (Phase 14: also
+    /// the switch, limit and counts of the SIMD LaneGroups, `simd_plans.lanes`. Their memory is
+    /// `contact_manager.simd_lanes`.)
     simd_plans: if (builtin.is_test) SimdPlans else void = if (builtin.is_test) .{} else {},
+
+    /// Zolt addition (Phase 14, class A): free the memory of the SIMD LaneGroups (ContactConstraintSimd.zig,
+    /// "LaneGroups"; between updates only), heap memory that Jolt does not have and that is kept between updates (for an
+    /// application whose allocator has a budget, SimulationArchitecture.md D5). The next update gathers and records its
+    /// demand, the one after it grows the LaneGroups again.
+    pub fn releaseSimdLanes(self: *Self) void {
+        const lanes = &self.contact_manager.simd_lanes;
+        lanes.free(self.contact_manager.allocator);
+        lanes.demand = 0;
+    }
+
+    /// Zolt addition (Phase 14, class A): before the jobs of an update, grow the memory of the SIMD LaneGroups
+    /// (ContactConstraintManager.simd_lanes) when the steps of the previous update asked for more groups than it holds:
+    /// to their demand (recordSimdLaneClaims, recordSimdLaneBound), and at least to twice its number of groups, so that
+    /// islands that grow from update to update cause few growths. The new block is allocated before the old one is
+    /// freed. A failed allocation keeps the old block (or none): the batches that find no room gather, with the same
+    /// bits. It is not an error: Jolt has no such allocation (SimulationArchitecture.md D5). (A block that was allocated
+    /// is extra heap memory of the system's allocator until releaseSimdLanes or deinit: with a bounded allocator it can
+    /// make a later allocation fail, D5.)
+    fn growSimdLanes(self: *Self) void {
+        if (!ContactConstraintSimd.enabled)
+            return;
+        const lanes = &self.contact_manager.simd_lanes;
+        self.recordSimdLaneClaims(); // (The claims of the last step of the previous update)
+        if (lanes.block) |block| block.claimed.store(0, .monotonic); // (No job runs: the first step does not count them again)
+        const demand = lanes.demand;
+        lanes.demand = 0;
+        if (demand <= lanes.capacity)
+            return;
+        const limit = if (builtin.is_test) @min(self.simd_plans.lanes.max_capacity, ContactConstraintSimd.max_lane_groups) else ContactConstraintSimd.max_lane_groups;
+        const capacity = @min(@max(demand, lanes.capacity *| 2), limit);
+        if (capacity <= lanes.capacity)
+            return;
+        lanes.replace(self.contact_manager.allocator, capacity) catch {
+            if (builtin.is_test) self.simd_plans.lanes.failed_growths += 1;
+            return;
+        };
+        if (builtin.is_test) self.simd_plans.lanes.growths += 1;
+    }
+
+    /// Zolt addition (Phase 14, class A): before the bump counter of the SIMD LaneGroups is reset (jobFinalizeIslands) or
+    /// the block grows (growSimdLanes), the claims of the step that ran last count towards the demand: the counter counts
+    /// every claim of the step, also those that found no room
+    fn recordSimdLaneClaims(self: *Self) void {
+        const lanes = &self.contact_manager.simd_lanes;
+        const block = lanes.block orelse return;
+        const claimed = block.claimed.load(.monotonic);
+        lanes.demand = @max(lanes.demand, @min(claimed, ContactConstraintSimd.max_lane_groups));
+        if (builtin.is_test and claimed > self.simd_plans.lanes.step_bound)
+            self.simd_plans.lanes.over_bound += 1; // (The step claimed more than laneGroupBound allows)
+    }
+
+    /// Zolt addition (Phase 14, class A): in jobFinalizeIslands of every step, after the splitter's prepare. Without a
+    /// block nothing counts the claims of this step, so its demand is the bound on the LaneGroups that its planned
+    /// batches can claim: ContactConstraintSimd.laneGroupBound over the split islands (the first num_split_islands
+    /// islands: they are sorted from big to small). (Test builds compute it in every step and check the claims against
+    /// it, recordSimdLaneClaims.) The bound does not know the batches, which splitIsland builds later: an island whose
+    /// parallel batches all have fewer than min_lanes contacts (or fewer than min_lanes dynamic vs dynamic ones) claims
+    /// no LaneGroup, and the block of the first growth stays unused until releaseSimdLanes or deinit (the ContactScene
+    /// without manifold reduction of PhysicsSystemTests: a bound of 102 LaneGroups, 391,744 bytes, no claim). Later
+    /// growths follow the claims.
+    fn recordSimdLaneBound(self: *Self) void {
+        const lanes = &self.contact_manager.simd_lanes;
+        if (lanes.block != null and !builtin.is_test)
+            return;
+        var bound: u64 = 0;
+        var island: u32 = 0;
+        while (island < self.large_island_splitter.num_split_islands) : (island += 1) {
+            const num_contacts: u32 = @intCast(self.island_builder.getContactsInIsland(island).len);
+            const num_constraints: u32 = @intCast(self.island_builder.getConstraintsInIsland(island).len);
+            bound += ContactConstraintSimd.laneGroupBound(num_contacts, LargeIslandSplitter.maxParallelBatches(num_contacts + num_constraints));
+        }
+        const step_bound: u32 = @intCast(@min(bound, ContactConstraintSimd.max_lane_groups));
+        if (builtin.is_test) self.simd_plans.lanes.step_bound = step_bound;
+        if (lanes.block == null)
+            lanes.demand = @max(lanes.demand, step_bound);
+    }
+
+    /// Zolt addition (Phase 14, class A): at the warm start of a planned batch (after planBatch), claim and build its
+    /// LaneGroups. Returns the batch's lane word: ContactConstraintSimd.laneWord of its first group, or no_lanes when its
+    /// velocity iterations gather (the split island has no velocity steps, the batch fills no group, there is no block or
+    /// no room, or a test turned the LaneGroups off).
+    fn claimSimdLanes(self: *Self, batch: *const LargeIslandSplitter.Batch, plan_word: u32) u32 {
+        if (builtin.is_test and !self.simd_plans.lanes.enabled)
+            return ContactConstraintSimd.no_lanes;
+        // (Without velocity steps the warm start is the batch's last iteration: nothing would read the LaneGroups)
+        if (self.large_island_splitter.getNumVelocitySteps(batch.split_island_index) <= 0)
+            return ContactConstraintSimd.no_lanes;
+        const lanes = &self.contact_manager.simd_lanes;
+        const block = lanes.block orelse return ContactConstraintSimd.no_lanes;
+        const num_dynamic = ContactConstraintSimd.plannedCount(plan_word, batch.contacts.len) orelse return ContactConstraintSimd.no_lanes; // (planBatch has just written the plan)
+        const num_groups = ContactConstraintSimd.numLaneGroups(num_dynamic);
+        if (num_groups == 0)
+            return ContactConstraintSimd.no_lanes;
+        const first = block.claimed.fetchAdd(num_groups, .monotonic);
+        if (first > lanes.capacity or num_groups > lanes.capacity - first) {
+            if (builtin.is_test) _ = self.simd_plans.lanes.no_room.fetchAdd(1, .monotonic);
+            return ContactConstraintSimd.no_lanes;
+        }
+        ContactConstraintSimd.buildLanes(&self.contact_manager, batch.contacts, num_dynamic, lanes.groups()[first..][0..num_groups]);
+        if (builtin.is_test) _ = self.simd_plans.lanes.laned.fetchAdd(1, .monotonic);
+        return ContactConstraintSimd.laneWord(first);
+    }
+
+    /// Zolt addition (Phase 14, class A), tests only: the LaneGroups part of `simd_plans`
+    pub const SimdLanesTesting = struct {
+        /// False: every planned batch gathers (set it only between updates)
+        enabled: bool = true,
+        /// The most LaneGroups that a growth allocates (set it only between updates)
+        max_capacity: u32 = ContactConstraintSimd.max_lane_groups,
+        /// Planned batches whose warm start built LaneGroups
+        laned: std.atomic.Value(u32) = .init(0),
+        /// Planned batches with velocity steps whose claim found no room in the block (they gathered)
+        no_room: std.atomic.Value(u32) = .init(0),
+        /// Steps whose LaneGroups claimed more than the bound that they recorded (must stay 0)
+        over_bound: u32 = 0,
+        /// The bound of the current step (recordSimdLaneBound)
+        step_bound: u32 = 0,
+        /// Growths that allocated a block, growths whose allocation failed
+        growths: u32 = 0,
+        failed_growths: u32 = 0,
+
+        /// The counts: laned, no_room, over_bound, growths, failed_growths
+        pub fn counts(self: *const SimdLanesTesting) [5]u32 {
+            return .{ self.laned.load(.monotonic), self.no_room.load(.monotonic), self.over_bound, self.growths, self.failed_growths };
+        }
+    };
 
     /// Zolt addition (Phase 13, class A), tests only: the counts and the switch of `simd_plans`
     pub const SimdPlans = struct {
@@ -442,6 +588,9 @@ pub const PhysicsSystem = struct {
         /// False: no batch is planned, the batches of the parallel splits take ContactConstraintSimd.solveBatch (set it
         /// only between updates)
         enabled: bool = true,
+        /// (Phase 14) The SIMD LaneGroups of the planned batches: a switch, a limit and counts (here, so that the
+        /// PhysicsSystem of a build without tests keeps its layout)
+        lanes: SimdLanesTesting = .{},
 
         /// The counts: planned, solved, unplanned
         pub fn counts(self: *const SimdPlans) [3]u32 {
@@ -963,6 +1112,11 @@ pub const PhysicsSystem = struct {
 
         // Zolt: Jolt resets the accumulated stats on the active bodies here (JPH_TRACK_SIMULATION_STATS), Zolt does it
         // after building the jobs, before the first job starts, so that a failure while building them changes nothing
+
+        // Zolt (Phase 14, class A): room for the SIMD LaneGroups that the steps of the last update can claim (a heap
+        // allocation before the jobs, a failure is not an error; the memory holds no state, so it changes nothing when
+        // building the jobs fails below)
+        self.growSimdLanes();
 
         // Calculate ratio between current and previous frame delta time to scale initial constraint forces.
         // Note that scaling of the impulses works perfectly for a system in equilibrium. When a body is falling on another body, it will receive
@@ -2186,6 +2340,14 @@ pub const PhysicsSystem = struct {
         var grant: BodyAccess.Grant = .init(.none, .none);
         defer grant.deinit();
 
+        // (Zolt, Phase 14, class A: the SIMD LaneGroups of the previous step are free again: its SolveVelocityConstraints
+        // jobs ended before this step started, the ones of this step start after this job. Its claims count towards the
+        // demand, then the bump counter starts again.)
+        if (ContactConstraintSimd.enabled) {
+            self.recordSimdLaneClaims();
+            if (self.contact_manager.simd_lanes.block) |block| block.claimed.store(0, .monotonic);
+        }
+
         // Finish collecting the islands, at this point the active body list doesn't change so it's safe to access
         const num_active_bodies = self.body_manager.getNumActiveBodies(.rigid_body);
         try self.island_builder.finalize(self.body_manager.getActiveBodiesUnsafe(.rigid_body)[0..num_active_bodies], self.contact_manager.getNumConstraints(), context.temp_allocator);
@@ -2193,6 +2355,11 @@ pub const PhysicsSystem = struct {
         // Prepare the large island splitter
         if (self.physics_settings.use_large_island_splitter)
             try self.large_island_splitter.prepare(&self.island_builder, self.body_manager.getNumActiveBodies(.rigid_body), context.temp_allocator);
+
+        // (Zolt, Phase 14, class A: without SIMD LaneGroups, the bound on the claims of this step is its demand for the
+        // growth in the next update)
+        if (ContactConstraintSimd.enabled)
+            self.recordSimdLaneBound();
     }
 
     fn jobBodySetIslandIndex(self: *Self) void {
@@ -2368,8 +2535,14 @@ pub const PhysicsSystem = struct {
                             // (Zolt: permute the batch's contacts to the order of its groups, the plan goes into a word of
                             // the splitter)
                             if (plan) {
-                                ContactConstraintSimd.planBatch(&self.contact_manager, batch.contacts, self.large_island_splitter.batchPlanWord(batch.contacts));
+                                const plan_word = self.large_island_splitter.batchPlanWord(batch.contacts);
+                                ContactConstraintSimd.planBatch(&self.contact_manager, batch.contacts, plan_word);
                                 if (builtin.is_test) _ = self.simd_plans.planned.fetchAdd(1, .monotonic);
+
+                                // (Zolt, Phase 14, class A: LaneGroups or gather is decided here, once per batch and step:
+                                // the lane word goes into the word after the plan word, see "LaneGroups" in
+                                // ContactConstraintSimd.zig)
+                                self.large_island_splitter.batchLaneWord(batch.contacts).* = self.claimSimdLanes(&batch, plan_word.*);
                             }
                         } else {
                             // Solve velocity constraints
@@ -2385,7 +2558,12 @@ pub const PhysicsSystem = struct {
                                     const counter = if (ContactConstraintSimd.plannedCount(plan_word, batch.contacts.len) != null) &self.simd_plans.solved else &self.simd_plans.unplanned;
                                     _ = counter.fetchAdd(1, .monotonic);
                                 }
-                                _ = ContactConstraintSimd.solvePlanned(&self.contact_manager, batch.contacts, plan_word);
+                                // (Zolt, Phase 14, class A: from the batch's LaneGroups when its warm start built them)
+                                const lane_word = self.large_island_splitter.batchLaneWord(batch.contacts).*;
+                                if (ContactConstraintSimd.hasLanes(lane_word))
+                                    _ = ContactConstraintSimd.solvePlannedLanes(&self.contact_manager, batch.contacts, plan_word, lane_word)
+                                else
+                                    _ = ContactConstraintSimd.solvePlanned(&self.contact_manager, batch.contacts, plan_word);
                             } else _ = ContactConstraintSimd.solveBatch(&self.contact_manager, batch.contacts, batch.parallel);
                         }
 
@@ -2395,8 +2573,18 @@ pub const PhysicsSystem = struct {
                         self.large_island_splitter.markBatchProcessed(batch.split_island_index, batch.constraints, batch.contacts, &last_iteration, &final_batch);
 
                         // Save back the lambdas in the contact cache for the warm start of the next physics update
-                        if (last_iteration)
+                        if (last_iteration) {
+                            // (Zolt, Phase 14, class A: the lambdas of the batch's LaneGroups go back to its constraints
+                            // first. A batch with LaneGroups has velocity steps, so its last iteration is not its warm
+                            // start. No other job reads these lambdas until the position iterations, which start after
+                            // every SolveVelocityConstraints job of the step and do not read them.)
+                            if (plan and !batch.first_iteration) {
+                                const lane_word = self.large_island_splitter.batchLaneWord(batch.contacts).*;
+                                if (ContactConstraintSimd.hasLanes(lane_word))
+                                    ContactConstraintSimd.writeBackLanes(&self.contact_manager, batch.contacts, self.large_island_splitter.batchPlanWord(batch.contacts).*, lane_word);
+                            }
                             self.contact_manager.storeAppliedImpulses(batch.contacts);
+                        }
 
                         if (track_simulation_stats) {
                             const num_ticks = getProcessorTickCount() -% start_tick;

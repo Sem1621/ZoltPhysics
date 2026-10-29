@@ -30,21 +30,22 @@ PhysicsSystem.update into main, or a name changed), and the count proves nothing
 Two scenes are Zolt only. Valgrind 3.22 stops the C++ binary with SIGILL at a VEX vmovq that it does not know: in
 the Ragdoll scene, and in BodyInterface::AddImpulse after the first character contact of CharacterVirtual.
 
-Measured on top of Phase 13, hot atomics on their own cache lines, the body pool and the SIMD plans (e1a10c0; Zig
-0.16.0, valgrind 3.22.0, x86-64-v3):
+Measured on top of Phase 14, the SIMD LaneGroups and the character pair data (fc36075; Zig 0.16.0, valgrind 3.22.0,
+x86-64-v3):
 
     Scene             Steps   Zolt Ir        C++ Ir         Zolt/C++   Budget
-    ConvexVsMesh        200   1,981,096,615  2,038,825,594  0.972      1.07
-    Pyramid              60   4,047,171,149  4,354,343,582  0.929      1.02
-    HighSpeed            60   1,998,964,036  2,041,903,417  0.979      1.08
-    CharacterVirtual     60     373,923,976  (Zolt only)               0.41e9
-    Ragdoll              15   1,681,319,639  (Zolt only)               1.85e9
+    ConvexVsMesh        200   1,980,768,617  2,038,825,594  0.972      1.07
+    Pyramid              60   3,769,125,044  4,354,343,582  0.866      0.95
+    HighSpeed            60   1,998,757,196  2,041,903,417  0.979      1.08
+    CharacterVirtual     60     343,950,960  (Zolt only)               0.38e9
+    Ragdoll              15   1,681,309,184  (Zolt only)               1.85e9
 
 The budgets are the measurement plus about 10%. Before Phase 10 the ratios were 17 (ConvexVsMesh) and 5.4 (Pyramid).
 After Phase 10 (W3, 4035b3c) Pyramid was 0.983; the SIMD contact solver of Phase 11 made it 0.960 (its contact solve
 went from 1,144M to 1,027M instructions, SimulationArchitecture.md section 10), the large island sorts of Phase 12
-0.953, the SIMD plans of Phase 13 0.929 (its budget went from 1.05 to 1.02). Phase 12's character bounds caches took
-CharacterVirtual from 578,784,382 to 373,906,184 (Roadmap Phase 12).
+0.953, the SIMD plans of Phase 13 0.929 (its budget went from 1.05 to 1.02), the SIMD LaneGroups of Phase 14 0.866
+(budget 0.95). Phase 12's character bounds caches took CharacterVirtual from 578,784,382 to 373,906,184 (Roadmap Phase
+12), Phase 14's character pair data to 343,950,960 (budget 0.41e9 to 0.38e9).
 SCENES keeps the measured counts too. Re-measure and update the budgets and the counts after a Zig, LLVM or valgrind
 upgrade, after a Jolt upgrade, and after a change that makes Zolt faster on purpose. A change that gives up speed on
 purpose updates them in the same commit and says why. The callgrind runs take about 30 seconds on 4 cores (they run in
@@ -68,11 +69,11 @@ Scene = collections.namedtuple("Scene", [
     "zolt_ir", "jolt_ir",  # The measured counts (None: not run)
 ])
 SCENES = [
-    Scene("ConvexVsMesh", "LinearCast", 200, 1.07, None, 1_981_096_615, 2_038_825_594),
-    Scene("Pyramid", "LinearCast", 60, 1.02, None, 4_047_171_149, 4_354_343_582),
-    Scene("HighSpeed", "LinearCast", 60, 1.08, None, 1_998_964_036, 2_041_903_417),
-    Scene("CharacterVirtual", "Discrete", 60, None, 0.41e9, 373_923_976, None),
-    Scene("Ragdoll", "LinearCast", 15, None, 1.85e9, 1_681_319_639, None),
+    Scene("ConvexVsMesh", "LinearCast", 200, 1.07, None, 1_980_768_617, 2_038_825_594),
+    Scene("Pyramid", "LinearCast", 60, 0.95, None, 3_769_125_044, 4_354_343_582),
+    Scene("HighSpeed", "LinearCast", 60, 1.08, None, 1_998_757_196, 2_041_903_417),
+    Scene("CharacterVirtual", "Discrete", 60, None, 0.38e9, 343_950_960, None),
+    Scene("Ragdoll", "LinearCast", 15, None, 1.85e9, 1_681_309_184, None),
 ]
 # A count below this part of its measurement fails: callgrind did not find the toggle functions
 MIN_PART = 0.5

@@ -121,4 +121,8 @@ If `zig` is missing (fresh cloud container), the SessionStart hook installs it; 
 - Phase 13 measured the rest (`perf_budget.py --cache-sim`, `wall_rounds.py`) and kept three class A changes: hot
   atomics on their own cache lines (PortingGuide section 9), rigid bodies in 64 KB pages (BodyManager's BodyPool) and
   SIMD contact groups planned once per step (ContactConstraintSimd.planBatch).
+- Phase 14 judged by data side cache estimates (code layout noise measured first) and kept two class A changes: SIMD
+  LaneGroups (a planned batch's step constant contact data in lane order for the step, ContactConstraintSimd) and the
+  character pair data on fewer cache lines (CharacterBoundsCache, line pinned). A third (MotionProperties in Jolt's
+  order, store forwarding sites in place) missed its wall clock keep rule and was reverted.
 - The port tracks Jolt v5.6.1 at commit `5830c34` (see Roadmap for syncing with upstream).

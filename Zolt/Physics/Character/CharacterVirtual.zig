@@ -72,11 +72,17 @@
 //!   transform is a function of (position, rotation, shape, shape offset, up, character padding) and that transform.
 //!   `refreshBoundsCache` stores them at the end of the construction, in UpdateInnerBodyTransform (SetPosition,
 //!   SetRotation, SetShapeOffset, Update, MoveToContact), on every exit of SetShape and at the end of RestoreState.
-//!   The loops of CharacterVsCharacterCollisionSimple read the transform of the other character from its cache when the
-//!   cache matches the character's current members bit for bit, and replay the world space bounds of its shape from
-//!   the cached parts that do not depend on the base offset (equal to Jolt's bounds as real numbers, which is all that
-//!   the reject decision reads; the proof is in the header of CharacterBoundsCache.zig). They run Jolt's code otherwise
-//!   (a stale cache, an unsupported shape or rotation, a translation that is not finite). The cache holds one reference
+//!   The loops of CharacterVsCharacterCollisionSimple use the cache of the other character when it matches the
+//!   character's current members bit for bit: they replay the world space bounds of its shape from the cached parts
+//!   that do not depend on the base offset and from the translation of transform2 alone (equal to Jolt's bounds as
+//!   real numbers, which is all that the reject decision reads; the proof is in the header of CharacterBoundsCache.zig),
+//!   and build Jolt's transform2, from the cached transform, only for a pair that passes the bounds test. They run
+//!   Jolt's code otherwise (a stale cache, an unsupported shape or rotation, a translation that is not finite).
+//!   Phase 14 (layout only): the cache is an extern struct held `align(64)`, so it is the first member and
+//!   CharacterVirtual is 64 byte aligned (allocator.create and embedding honour that; temp memory could not hold a
+//!   character). A comptime block below the field pins the offsets of the members that a rejected pair reads, so
+//!   that it reads 6 cache lines of the other character in single precision (8 in double precision) instead of 9
+//!   (CharacterBoundsCache.zig, Layout; PortingGuide.md section 5, "Line pinned layouts"). The cache holds one reference
 //!   to the shape of its stored key, whatever the shape (also an unsupported one), for as long as that is its key: the
 //!   reference count of a shape (Shape.getRefCount) is higher than in Jolt by the number of characters whose cache
 //!   holds it (one for a character's own shape, 100 for a shape that 100 characters share), and after a direct write
@@ -728,22 +734,37 @@ pub const CharacterVsCharacterCollisionSimple = struct {
         // Iterate over all characters
         for (self.characters.items) |c| {
             if (c != character and !collector.shouldEarlyOut()) {
-                // Make shape 2 relative to inBaseOffset
-                // (Zolt: with the center of mass transform of the bounds cache of character 2, CharacterBoundsCache.zig)
+                // (Zolt: the bounds cache of character 2, CharacterBoundsCache.zig; null: Jolt's code for this pair)
                 const cache = self.findBoundsCache(c);
-                const transform2 = centerOfMassTransform(c, cache).postTranslatedRVec3(base_offset.negate()).toMat44();
 
                 // We need to add the padding of character 2 so that we will detect collision with its outer shell
                 settings.max_separation_distance = collide_shape_settings.max_separation_distance + c.getCharacterPadding();
 
                 // Check if the bounding boxes of the characters overlap
+                // (Zolt: the replay of the cache needs only the translation of transform2, so with a cache transform2 is
+                // built for an accepted pair only. The test is written once per path, so that a rejected pair with a
+                // cache does not join Jolt's path: 5 to 6 instructions less per pair)
                 const shape2 = c.getShape().?;
-                var bounds2 = self.worldSpaceBounds(cache, shape2, transform2);
-                bounds2.expandBy(Vec3.replicate(settings.max_separation_distance));
-                if (!bounds1.overlaps(bounds2)) {
-                    self.count(cache, .rejected);
-                    continue;
-                }
+                var bounds2: AABox = undefined;
+                const transform2 = if (self.replayBounds(cache, base_offset, &bounds2)) replayed: {
+                    bounds2.expandBy(Vec3.replicate(settings.max_separation_distance));
+                    if (!bounds1.overlaps(bounds2)) {
+                        self.count(cache, .rejected);
+                        continue;
+                    }
+                    // Make shape 2 relative to inBaseOffset
+                    break :replayed transform2Of(c, cache, base_offset);
+                } else jolt: {
+                    // Make shape 2 relative to inBaseOffset
+                    const jolt_transform2 = transform2Of(c, cache, base_offset);
+                    bounds2 = shape2.getWorldSpaceBounds(jolt_transform2, Vec3.one());
+                    bounds2.expandBy(Vec3.replicate(settings.max_separation_distance));
+                    if (!bounds1.overlaps(bounds2)) {
+                        self.count(cache, .rejected);
+                        continue;
+                    }
+                    break :jolt jolt_transform2;
+                };
                 self.count(cache, .accepted);
 
                 // Collector needs to know which character we're colliding with
@@ -774,22 +795,36 @@ pub const CharacterVsCharacterCollisionSimple = struct {
         // Iterate over all characters
         for (self.characters.items) |c| {
             if (c != character and !collector.shouldEarlyOut()) {
-                // Make shape 2 relative to inBaseOffset
-                // (Zolt: with the center of mass transform of the bounds cache of character 2, CharacterBoundsCache.zig)
+                // (Zolt: the bounds cache of character 2, CharacterBoundsCache.zig; null: Jolt's code for this pair)
                 const cache = self.findBoundsCache(c);
-                const transform2 = centerOfMassTransform(c, cache).postTranslatedRVec3(base_offset.negate()).toMat44();
 
                 // We need to add the padding of character 2 so that we will detect collision with its outer shell
                 cast_settings.extra_convex_radius = shape_cast_settings.extra_convex_radius + c.getCharacterPadding();
 
                 // Sweep bounding box of the character against the bounding box of the other character to see if they can collide
+                // (Zolt: as in collideCharacter, with a cache transform2 is built for an accepted pair only, and the
+                // test is written once per path)
                 const shape2 = c.getShape().?;
-                var bounds2 = self.worldSpaceBounds(cache, shape2, transform2);
-                bounds2.expandBy(extents.add(Vec3.replicate(c.getCharacterPadding())));
-                if (!rayAABoxHitsDirection(origin, direction, bounds2.min, bounds2.max)) {
-                    self.count(cache, .rejected);
-                    continue;
-                }
+                var bounds2: AABox = undefined;
+                const transform2 = if (self.replayBounds(cache, base_offset, &bounds2)) replayed: {
+                    bounds2.expandBy(extents.add(Vec3.replicate(c.getCharacterPadding())));
+                    if (!rayAABoxHitsDirection(origin, direction, bounds2.min, bounds2.max)) {
+                        self.count(cache, .rejected);
+                        continue;
+                    }
+                    // Make shape 2 relative to inBaseOffset
+                    break :replayed transform2Of(c, cache, base_offset);
+                } else jolt: {
+                    // Make shape 2 relative to inBaseOffset
+                    const jolt_transform2 = transform2Of(c, cache, base_offset);
+                    bounds2 = shape2.getWorldSpaceBounds(jolt_transform2, Vec3.one());
+                    bounds2.expandBy(extents.add(Vec3.replicate(c.getCharacterPadding())));
+                    if (!rayAABoxHitsDirection(origin, direction, bounds2.min, bounds2.max)) {
+                        self.count(cache, .rejected);
+                        continue;
+                    }
+                    break :jolt jolt_transform2;
+                };
                 self.count(cache, .accepted);
 
                 // Collector needs to know which character we're colliding with
@@ -818,20 +853,29 @@ pub const CharacterVsCharacterCollisionSimple = struct {
 
     /// Zolt (Phase 12): GetCenterOfMassTransform() of character `c`, from its bounds cache when it has one (the same bits)
     inline fn centerOfMassTransform(c: *const CharacterVirtual, cache: ?*const CharacterBoundsCache) RMat44 {
-        return if (cache) |cached| cached.center_of_mass_transform else c.getCenterOfMassTransform();
+        return if (cache) |cached| cached.m.center_of_mass_transform else c.getCenterOfMassTransform();
     }
 
-    /// Zolt (Phase 12): `shape2.GetWorldSpaceBounds(transform2, Vec3::sOne())` as real numbers: replayed by the bounds
-    /// cache of character 2 when it has one and the translations are finite (CharacterBoundsCache.zig), Jolt's function
-    /// otherwise. The loops use the box only in ExpandBy and in the overlap / ray tests, whose answers depend only on the
-    /// real values.
-    inline fn worldSpaceBounds(self: *const CharacterVsCharacterCollisionSimple, cache: ?*const CharacterBoundsCache, shape2: *const Shape, transform2: Mat44) AABox {
-        if (cache) |cached| {
-            if (cached.replay.bounds(transform2.getTranslation())) |bounds|
-                return bounds;
-            self.countNoCache(.non_finite);
+    /// Zolt (Phase 14): Jolt's `transform2` of the loops, `GetCenterOfMassTransform().PostTranslated(-inBaseOffset)
+    /// .ToMat44()` of character 2 (from its bounds cache when it has one, the same bits)
+    inline fn transform2Of(c: *const CharacterVirtual, cache: ?*const CharacterBoundsCache, base_offset: RVec3) Mat44 {
+        return centerOfMassTransform(c, cache).postTranslatedRVec3(base_offset.negate()).toMat44();
+    }
+
+    /// Zolt (Phase 12, Phase 14): `shape2.GetWorldSpaceBounds(transform2, Vec3::sOne())` as real numbers in `bounds`,
+    /// replayed by the bounds cache of character 2 from the translation of transform2 alone (`translation2`, Jolt's
+    /// bits in X, Y and Z, CharacterBoundsCache.zig). Returns false, with `bounds` untouched, when there is no cache or
+    /// a translation of the replay is not finite: then the loop runs Jolt's function on Jolt's transform2. The loops use
+    /// the box only in ExpandBy and in the overlap / ray tests, whose answers depend only on the real values of X, Y
+    /// and Z.
+    inline fn replayBounds(self: *const CharacterVsCharacterCollisionSimple, cache: ?*const CharacterBoundsCache, base_offset: RVec3, bounds: *AABox) bool {
+        const cached = cache orelse return false;
+        if (cached.m.replay.bounds(cached.translation2(base_offset))) |replayed| {
+            bounds.* = replayed;
+            return true;
         }
-        return shape2.getWorldSpaceBounds(transform2, Vec3.one());
+        self.countNoCache(.non_finite);
+        return false;
     }
 
     /// Zolt (Phase 12, test builds): count a decision that the bounds cache of the other character made
@@ -1005,8 +1049,41 @@ pub const CharacterVirtual = struct {
     inner_body_id: BodyID = .invalid,
 
     /// Zolt (Phase 12): what CharacterVsCharacterCollisionSimple needs of this character when another character queries
-    /// it, refreshed by `refreshBoundsCache` (CharacterBoundsCache.zig)
-    bounds_cache: CharacterBoundsCache = .{},
+    /// it, refreshed by `refreshBoundsCache` (CharacterBoundsCache.zig).
+    /// Zolt (Phase 14): `align(64)`, so Zig's layout puts it first and the character is 64 byte aligned; the comptime
+    /// block below pins the cache lines that a rejected pair of CharacterVsCharacterCollisionSimple reads.
+    bounds_cache: CharacterBoundsCache align(64) = .{},
+
+    // Zolt (Phase 14): the members that a rejected pair of CharacterVsCharacterCollisionSimple reads of the other
+    // character (the key compare and, with a valid cache, the replay; CharacterBoundsCache.zig, Layout) and their cache
+    // lines, for a sphere or a capsule, pinned per precision (64 bit targets):
+    // - single precision: the cache [0, 64) stored key vectors, [64, 128) replay head, [320, 352) shape / padding /
+    //   state / translation, sharing the line [320, 384) with CharacterBase.up (352); CharacterBase.shape 464;
+    //   rotation 528, position 544 and shape offset 560 in [512, 576); character padding 712: 6 lines (Phase 13: 9);
+    // - double precision: the cache [0, 192); CharacterBase.up 416; CharacterBase.shape 512; position 576 and rotation
+    //   624 in [576, 640); shape offset 640; character padding 792: 8 lines.
+    // A failing assert means that a member was added or moved, or that the compiler orders the fields differently:
+    // re-tune the layout (PortingGuide.md section 5, "Line pinned layouts"), then the offsets here and the line counts
+    // of CharacterBoundsCacheTests.
+    comptime {
+        const cache = @offsetOf(CharacterVirtual, "bounds_cache") + @offsetOf(CharacterBoundsCache, "m");
+        const up = @offsetOf(CharacterVirtual, "base") + @offsetOf(CharacterBase, "up");
+        const shape = @offsetOf(CharacterVirtual, "base") + @offsetOf(CharacterBase, "shape");
+        const position = @offsetOf(CharacterVirtual, "position");
+        const rotation = @offsetOf(CharacterVirtual, "rotation");
+        const shape_offset = @offsetOf(CharacterVirtual, "shape_offset");
+        const padding = @offsetOf(CharacterVirtual, "character_padding");
+        std.debug.assert(@alignOf(CharacterVirtual) == 64 and cache == 0);
+        if (@sizeOf(usize) == 8) {
+            if (Core.double_precision) {
+                std.debug.assert(up == 416 and shape == 512 and position == 576 and rotation == 624 and shape_offset == 640 and padding == 792);
+            } else {
+                std.debug.assert(up == 352 and shape == 464 and rotation == 528 and position == 544 and shape_offset == 560 and padding == 712);
+                const Layout = CharacterBoundsCache.Layout;
+                std.debug.assert((cache + @offsetOf(Layout, "shape")) / 64 == up / 64 and (cache + @offsetOf(Layout, "translation") + @sizeOf(Vec3) - 1) / 64 == up / 64);
+            }
+        }
+    }
 
     pub const ContactList = std.ArrayList(CharacterContact);
 

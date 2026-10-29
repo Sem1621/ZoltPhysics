@@ -29,14 +29,27 @@
 //! that sort the contacts and constraints into the splits, and nothing reads them afterwards. So after splitIsland the
 //! entry at the index of a batch's first contact in `contact_and_constraint_indices` (`batchPlanWord`) belongs to that
 //! batch: its warm start writes the plan there, its velocity iterations read it. A plan carries a marker that no split
-//! index has, so a word that splitIsland wrote is never taken for a plan. Rules for changes to this file:
-//! - Add no reader of `contact_and_constraints_split_idx` after splitIsland (or keep the split indices elsewhere).
+//! index has, so a word that splitIsland wrote is never taken for a plan.
+//!
+//! Zolt addition (Phase 14, class A): the entry after the plan word, at the index of the batch's second contact
+//! (`batchLaneWord`), holds the batch's lane word (ContactConstraintSimd.zig, "LaneGroups"): where the SIMD LaneGroups of
+//! the batch are, or that its velocity iterations gather. Only planned batches use it, and a planned batch has at least
+//! ContactConstraintSimd.min_lanes contacts, so that entry belongs to the batch too. The warm start of the batch writes
+//! it (after planBatch), its velocity iterations read it, and so does the write back of its lambdas after its last
+//! velocity iteration (in the job that marks that iteration processed). A lane word carries its own marker (0x4c in the
+//! high 8 bits), which neither a split index nor a plan word has. Rules for changes to this file:
+//! - Add no reader of `contact_and_constraints_split_idx` after splitIsland (or keep the split indices elsewhere). Its
+//!   two readers and writers after splitIsland are the plan word and the lane word of a planned batch, at the batch's
+//!   first and second contact.
 //! - The contacts of a batch must stay a function of its split and its first item (the item counter of the status
 //!   restarts at 0 for every split and iteration and grows by batch_size): the velocity iterations of a batch must see
-//!   the slice that its warm start planned. A future bounds phase or another batch layout has to keep that, or plan
-//!   per batch layout.
+//!   the slice that its warm start planned, and the LaneGroups that it built. A future bounds phase or another batch
+//!   layout has to keep that, or plan per batch layout.
 //! - splitIsland must keep writing every entry of its island's range before startFirstBatch: the buffer comes from
-//!   the temp allocator and can hold the plans of the previous collision step.
+//!   the temp allocator and can hold the plans and lane words of the previous collision step.
+//! - `maxParallelBatches` bounds the batches of the parallel splits of an island (ceil(items / batch_size) per split):
+//!   a change of batch_size, of the number of splits or of the batch layout must keep it an upper bound, otherwise the
+//!   LaneGroups of PhysicsSystem grow too little (a batch without room gathers, with the same bits, only slower).
 //!
 //! Out parameters and pointers:
 //! - `Splits::FetchNextBatch` / `LargeIslandSplitter::FetchNextBatch` write their out parameters into an out struct
@@ -750,10 +763,37 @@ pub const LargeIslandSplitter = struct {
     /// batch's first contact in contact_and_constraint_indices. splitIsland writes the entries of its island before the
     /// island's first batch and nothing reads them afterwards (see the top of this file).
     pub fn batchPlanWord(self: *LargeIslandSplitter, contacts: []const u32) *u32 {
+        return &self.contact_and_constraints_split_idx.items[self.batchContactIndex(contacts)];
+    }
+
+    /// Zolt addition (Phase 14, class A): the word that holds the lane word of the batch whose contacts are `contacts`
+    /// (ContactConstraintSimd.laneWord or no_lanes: where its SIMD LaneGroups are): the entry of
+    /// contact_and_constraints_split_idx after its plan word (batchPlanWord), at the index of the batch's second contact.
+    /// A planned batch has at least ContactConstraintSimd.min_lanes contacts, so the entry belongs to the batch. Its warm
+    /// start writes it, its velocity iterations and the write back after its last one read it (see the top of this file).
+    pub fn batchLaneWord(self: *LargeIslandSplitter, contacts: []const u32) *u32 {
+        std.debug.assert(contacts.len >= 2);
+        return &self.contact_and_constraints_split_idx.items[self.batchContactIndex(contacts) + 1];
+    }
+
+    /// The index of the first of the batch contacts `contacts` (not empty) in contact_and_constraint_indices
+    fn batchContactIndex(self: *const LargeIslandSplitter, contacts: []const u32) usize {
         const indices = self.contact_and_constraint_indices.items;
         std.debug.assert(contacts.len > 0 and @intFromPtr(contacts.ptr) >= @intFromPtr(indices.ptr) and @intFromPtr(contacts.ptr + contacts.len) <= @intFromPtr(indices.ptr + indices.len));
-        const index = (@intFromPtr(contacts.ptr) - @intFromPtr(indices.ptr)) / @sizeOf(u32);
-        return &self.contact_and_constraints_split_idx.items[index];
+        return (@intFromPtr(contacts.ptr) - @intFromPtr(indices.ptr)) / @sizeOf(u32);
+    }
+
+    /// Zolt addition (Phase 14, class A): the number of velocity steps of a split island (Jolt's mNumVelocitySteps)
+    pub fn getNumVelocitySteps(self: *const LargeIslandSplitter, split_island_index: u32) i32 {
+        std.debug.assert(split_island_index < self.num_split_islands);
+        return self.split_islands.items[split_island_index].num_velocity_steps;
+    }
+
+    /// Zolt addition (Phase 14, class A): the most batches that the parallel splits of a split island with
+    /// `island_size` contacts and constraints can have (for the bound of ContactConstraintSimd.laneGroupBound): a
+    /// parallel split of n items has ceil(n / batch_size) batches, and there are non_parallel_split_idx parallel splits
+    pub fn maxParallelBatches(island_size: u32) u32 {
+        return island_size / batch_size + non_parallel_split_idx;
     }
 
     /// Get the island index of the island that was split for a particular split island index
@@ -883,6 +923,22 @@ test "LargeIslandSplitter.batchPlanWord is the split index entry of the batch's 
     try std.testing.expectEqual(&split_idx[0], splitter.batchPlanWord(indices[0..16]));
     try std.testing.expectEqual(&split_idx[16], splitter.batchPlanWord(indices[16..32]));
     try std.testing.expectEqual(&split_idx[37], splitter.batchPlanWord(indices[37..40]));
+}
+
+test "LargeIslandSplitter.batchLaneWord is the split index entry of the batch's second contact" {
+    var indices: [40]u32 = undefined;
+    var split_idx: [40]u32 = undefined;
+    var splitter: LargeIslandSplitter = .empty;
+    splitter.contact_and_constraint_indices = .{ .items = &indices };
+    splitter.contact_and_constraints_split_idx = .{ .items = &split_idx };
+    defer {
+        splitter.contact_and_constraint_indices = .empty;
+        splitter.contact_and_constraints_split_idx = .empty;
+    }
+    // (The entry after the plan word, inside the batch: a planned batch has at least 4 contacts)
+    try std.testing.expectEqual(&split_idx[1], splitter.batchLaneWord(indices[0..16]));
+    try std.testing.expectEqual(&split_idx[17], splitter.batchLaneWord(indices[16..32]));
+    try std.testing.expectEqual(&split_idx[37], splitter.batchLaneWord(indices[36..40])); // (Plan word: split_idx[36])
 }
 
 test "LargeIslandSplitter.Splits status bits" {

@@ -48,6 +48,15 @@
 //! that embeds it) is now 64 byte aligned. The test "ContactConstraintManager: the constraint counter has its own cache
 //! line" walks the fields.
 //!
+//! Zolt addition (Phase 14, class A): `simd_lanes`, the heap memory of the SIMD LaneGroups of PhysicsSystem's planned
+//! batches (ContactConstraintSimd.zig, "LaneGroups"; PhysicsSystem grows it and claims from it), freed in deinit. Its
+//! 16 bytes take free bytes at the end of the manager, so the manager stays 384 bytes (448 in Debug) and the
+//! PhysicsSystem keeps its layout: a new field of PhysicsSystem (27 fields, not in the order of declaration within an
+//! alignment) made Zig order PhysicsSystem's 8 byte aligned fields differently, which moved the data of other jobs
+//! (PortingGuide section 9). The manager's fields are in the order of declaration within an alignment, so only
+//! max_constraints and cache_write_idx move by 16 bytes, within the cache line of write_cache. The test
+//! "ContactConstraintManager: simd_lanes takes free bytes at the end" checks it.
+//!
 //! Signatures:
 //! - Jolt's constructor `ContactConstraintManager(const PhysicsSettings &)` and `Init` are one in place `init` that
 //!   takes the allocator of the caches (porting guide: constructor + Init). The manager (and so the PhysicsSystem
@@ -108,6 +117,7 @@ const track_simulation_stats = MotionPropertiesFile.track_simulation_stats;
 const SubShapeID = @import("../Collision/Shape/SubShapeID.zig").SubShapeID;
 const SubShapeIDPair = @import("../Collision/Shape/SubShapeIDPair.zig").SubShapeIDPair;
 const CollideShapeResult = @import("../Collision/CollideShape.zig").CollideShapeResult;
+const ContactConstraintSimd = @import("ContactConstraintSimd.zig");
 const ContactListenerFile = @import("../Collision/ContactListener.zig");
 const ContactListener = ContactListenerFile.ContactListener;
 const ContactManifold = ContactListenerFile.ContactManifold;
@@ -1146,6 +1156,11 @@ pub const ContactConstraintManager = struct {
     /// The cache we're currently writing to (fixed at the start of the step so that it remains even after we swap mCacheWriteIdx in FinalizeContactCacheAndCallContactPointRemovedCallbacks, valid only during stepping)
     write_cache: ?*ManifoldCache = null,
 
+    /// Zolt addition (Phase 14, class A): the heap memory of the SIMD LaneGroups of the planned batches of PhysicsSystem
+    /// (ContactConstraintSimd.zig, "LaneGroups"), freed in deinit. It takes free bytes at the end of the manager, see the
+    /// top of this file.
+    simd_lanes: ContactConstraintSimd.SimdLanes = .{},
+
     /// Not initialized (Jolt's constructor without the settings), call init
     pub const empty: ContactConstraintManager = .{};
 
@@ -1197,6 +1212,7 @@ pub const ContactConstraintManager = struct {
 
         // Zolt: `init` sets max_constraints to at least 4, an `empty` manager owns nothing
         if (self.max_constraints != 0) {
+            self.simd_lanes.free(self.allocator); // (Zolt, Phase 14)
             self.cache[1].deinit(self.allocator);
             self.cache[0].deinit(self.allocator);
         }
@@ -2577,4 +2593,32 @@ test "ContactConstraintManager: the constraint counter has its own cache line" {
     }
     try std.testing.expectEqual(@as(usize, 0), shared);
     try std.testing.expectEqual(@as(usize, 0), @alignOf(CCM) % line);
+}
+
+// Zolt (Phase 14): simd_lanes takes free bytes at the end of the manager: the fields in front of it keep their offsets
+// and without it the manager would have the same size, so the PhysicsSystem that embeds it keeps its layout (384 bytes
+// in ReleaseFast, 448 in Debug, before and after Phase 14). Only max_constraints and cache_write_idx move behind it,
+// within the cache line of write_cache.
+test "ContactConstraintManager: simd_lanes takes free bytes at the end" {
+    const CCM = ContactConstraintManager;
+    const line = Core.cache_line_size;
+    const lanes_begin = @offsetOf(CCM, "simd_lanes");
+    const lanes_end = lanes_begin + @sizeOf(ContactConstraintSimd.SimdLanes);
+
+    // Right behind write_cache, the last of the 8 byte aligned fields
+    try std.testing.expectEqual(@offsetOf(CCM, "write_cache") + @sizeOf(@FieldType(CCM, "write_cache")), lanes_begin);
+    var end: usize = 0;
+    inline for (@typeInfo(CCM).@"struct".fields) |field| {
+        end = @max(end, @offsetOf(CCM, field.name) + @sizeOf(field.type));
+        if (comptime !std.mem.eql(u8, field.name, "simd_lanes") and !std.mem.eql(u8, field.name, "max_constraints") and !std.mem.eql(u8, field.name, "cache_write_idx"))
+            try std.testing.expect(@offsetOf(CCM, field.name) < lanes_begin);
+    }
+
+    // Without it the manager would not be smaller
+    try std.testing.expectEqual(@sizeOf(CCM), std.mem.alignForward(usize, end - @sizeOf(ContactConstraintSimd.SimdLanes), @alignOf(CCM)));
+
+    // The fields that moved stay in the cache line of write_cache
+    try std.testing.expectEqual(@offsetOf(CCM, "write_cache") / line, (lanes_end - 1) / line);
+    try std.testing.expectEqual(@offsetOf(CCM, "write_cache") / line, @offsetOf(CCM, "cache_write_idx") / line);
+    try std.testing.expectEqual(@offsetOf(CCM, "write_cache") / line, (@offsetOf(CCM, "max_constraints") + 3) / line);
 }
