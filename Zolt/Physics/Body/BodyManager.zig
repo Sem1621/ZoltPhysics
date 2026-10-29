@@ -142,14 +142,6 @@ pub const BodyIDVector = std.ArrayList(BodyID);
 pub const BodyWithMotionProperties = struct {
     body: Body = .{},
     motion_properties: MotionProperties = .{},
-
-    // Zolt: the motion properties follow the body like in Jolt (offset 128 in single precision). In double precision
-    // Jolt's compiler puts them in the tail padding of Body (offset 144: Body's data ends at 138), which Zig does not
-    // reuse (offset 160).
-    comptime {
-        if (@sizeOf(usize) == 8 and Core.object_layer_bits == 16)
-            std.debug.assert(@offsetOf(BodyWithMotionProperties, "motion_properties") == if (Core.double_precision) 160 else 128);
-    }
 };
 
 /// Helper class that combines a soft body its motion properties and shape
@@ -393,11 +385,8 @@ pub const BodyManager = struct {
             // On 64-bit targets the slots have no padding: a body takes exactly the bytes of BodyWithMotionProperties
             // and starts a cache line. 320 bytes in single precision, 384 in double precision; asserts (MotionProperties'
             // cached types) and the debug renderer do not change the size. (Like Body's size assert, this one holds for
-            // 64-bit targets only; elsewhere the slots are @sizeOf(BodyWithMotionProperties) apart. With
-            // JPH_TRACK_SIMULATION_STATS, whose 56 bytes make the slots 368 / 448 bytes, it holds in double precision
-            // only: the single precision slots are not a multiple of 64 bytes, the pool works, but not every slot
-            // starts a cache line.)
-            if (@sizeOf(usize) == 8 and (!track_simulation_stats or Core.double_precision)) std.debug.assert(@sizeOf(Slot) % slot_alignment == 0);
+            // 64-bit targets only; elsewhere the slots are @sizeOf(BodyWithMotionProperties) apart.)
+            if (@sizeOf(usize) == 8) std.debug.assert(@sizeOf(Slot) % slot_alignment == 0);
             std.debug.assert(@alignOf(Slot) <= slot_alignment);
             std.debug.assert(@sizeOf(Page) <= header_size and header_size % slot_alignment == 0);
             std.debug.assert(@sizeOf(FreeSlot) <= @sizeOf(Slot) and @alignOf(FreeSlot) <= slot_alignment);

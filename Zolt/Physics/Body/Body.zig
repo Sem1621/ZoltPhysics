@@ -2,15 +2,10 @@
 //! Status: complete
 //!
 //! SimulationArchitecture D1:
-//! - `Body` is a plain struct with Jolt's fields in Jolt's order and alignment groups; its size (128 / 160 bytes),
-//!   alignment and field offsets are checked at compile time against Jolt's (x86-64 clang, both precisions: the fields
-//!   are already sorted by alignment, so Zig's layout keeps them). Members that Jolt's private default constructor
-//!   leaves uninitialized default to `undefined`, so `Body{}` is Jolt's `Body()` (bodies are created by
-//!   BodyManager.allocateBody; tests may create `Body{ .id = ... }` to pass a body to a collector or listener).
-//! - `calculateWorldSpaceBoundsInternal` copies the bounds that the shape just returned in 16 byte halves
-//!   (AABox.assignInHalves): `self.bounds = shape.getWorldSpaceBounds(...)` went through a temporary that a 32 byte
-//!   load copied right after the callee's two 16 byte stores, a store forwarding stall per body and step
-//!   (PortingGuide.md "Large values").
+//! - `Body` is a plain struct with Jolt's fields in Jolt's order and alignment groups; its size (128 / 160 bytes) and
+//!   alignment are checked at compile time. Members that Jolt's private default constructor leaves uninitialized default
+//!   to `undefined`, so `Body{}` is Jolt's `Body()` (bodies are created by BodyManager.allocateBody; tests may create
+//!   `Body{ .id = ... }` to pass a body to a collector or listener).
 //! - `Body::EFlags` are the integer constants of `Body.Flags` on the atomic `flags`; Jolt's `memory_order_relaxed` is
 //!   `.monotonic`.
 //! - `Body::sFixedToWorld` is `Body.fixedToWorld()`: a compile time constant in read-only memory (Jolt's `Body(bool)`
@@ -170,25 +165,6 @@ pub const Body = struct {
             std.debug.assert(@sizeOf(Body) == if (Core.double_precision) 160 else 128);
         // static_assert(alignof(Body) == max(JPH_VECTOR_ALIGNMENT, JPH_RVECTOR_ALIGNMENT), "Body should properly align")
         std.debug.assert(@alignOf(Body) == @max(Core.vector_alignment, Real.rvector_alignment));
-    }
-
-    // Zolt: Zig's layout of this plain struct is Jolt's (x86-64 clang, the C++ reference build in both precisions):
-    // the fields are in Jolt's order and already sorted by alignment, so the compiler keeps them
-    comptime {
-        if (@sizeOf(usize) == 8 and Core.object_layer_bits == 16) {
-            const p: usize = if (Core.double_precision) 16 else 0; // RVec3 is 32 bytes in double precision
-            const offsets = .{
-                .{ "position", 0 },                .{ "rotation", 16 + p },          .{ "bounds", 32 + p },
-                .{ "shape", 64 + p },              .{ "motion_properties", 72 + p }, .{ "user_data", 80 + p },
-                .{ "collision_group", 88 + p },    .{ "friction", 104 + p },         .{ "restitution", 108 + p },
-                .{ "id", 112 + p },                .{ "object_layer", 116 + p },     .{ "body_type", 118 + p },
-                .{ "broad_phase_layer", 119 + p }, .{ "motion_type", 120 + p },      .{ "flags", 121 + p },
-            };
-            for (offsets) |o| {
-                if (@offsetOf(Body, o[0]) != o[1])
-                    @compileError(std.fmt.comptimePrint("Body.{s} is at {d}, Jolt's at {d}", .{ o[0], @offsetOf(Body, o[0]), o[1] }));
-            }
-        }
     }
 
     /// static const EmptyShape sFixedToWorldShape: a static shape (never reference counted) in read-only memory
@@ -1167,10 +1143,7 @@ pub const Body = struct {
 
     /// Updates world space bounding box (should only be called by the PhysicsSystem)
     pub fn calculateWorldSpaceBoundsInternal(self: *Body) void {
-        // Zolt: copied in 16 byte halves (AABox.assignInHalves: the callee stores the AABox with two 16 byte stores, a
-        // 32 byte copy right after fails store forwarding)
-        const bounds = self.getShape().getWorldSpaceBoundsRMat44(self.getCenterOfMassTransform(), Vec3.one());
-        self.bounds.assignInHalves(&bounds);
+        self.bounds = self.getShape().getWorldSpaceBoundsRMat44(self.getCenterOfMassTransform(), Vec3.one());
     }
 
     /// Function to update body's position (should only be called by the BodyInterface since it also requires updating the broadphase)

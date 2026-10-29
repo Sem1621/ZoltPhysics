@@ -95,40 +95,6 @@ pub inline fn swap(comptime T: type, a: *T, b: *T) void {
     b.* = tmp;
 }
 
-/// Zolt: `v` itself, the same bits (NaN payloads and -0 too), but opaque to the compiler. Storing the result of a 16
-/// byte load through this keeps the compiler from merging two neighbouring 16 byte load / store pairs into one 32 byte
-/// copy, whose 32 byte load fails store forwarding when the source was just written with two 16 byte stores (an AABox
-/// or Mat44 returned by a call). See AABox.assignInHalves and PortingGuide.md, "Large values".
-/// - x86-64 with the LLVM backend (the CI's Linux and Windows rows, -Dcpu=x86_64_v3 and baseline): an empty inline asm
-///   that takes and returns the value in an xmm register. It emits no instruction: a copy in halves is two 16 byte
-///   load / store pairs (vmovaps), where a plain struct copy is one 32 byte (ymm) pair.
-/// - Every other target (aarch64 on macOS, where ldr / str q copy 16 bytes anyway) and Zig's self-hosted backend
-///   (-Duse_llvm=false): `return v`, a plain copy. The condition is comptime, so no asm is compiled there.
-pub inline fn opaqueVector(v: @Vector(4, f32)) @Vector(4, f32) {
-    if (comptime builtin.cpu.arch == .x86_64 and builtin.zig_backend == .stage2_llvm)
-        return asm (""
-            : [ret] "=x" (-> @Vector(4, f32)),
-            : [v] "0" (v),
-        );
-    return v;
-}
-
-test "opaqueVector returns the bits of its input (NaN payloads, -0, infinities, denormals)" {
-    // Zolt: the asm branch (x86-64 with LLVM) and the plain branch (other targets, the self-hosted backend) must both
-    // be a bit copy, also of values that a float operation would change (a signaling NaN, a NaN payload, a denormal,
-    // -0)
-    const special = [_]u32{ 0x7fc0_0001, 0x7f80_0001, 0xffff_ffff, 0xff80_0000, 0x8000_0000, 0x0000_0001, 0x8000_0001, 0x7f80_0000, 0x0000_0000, 0x3f80_0000, 0xffc0_dead, 0x7fbf_ffff };
-    var prng = std.Random.DefaultPrng.init(0x0bad_cafe);
-    const random = prng.random();
-    for (0..256) |i| {
-        var bits: [4]u32 = undefined;
-        for (&bits, 0..) |*b, j| b.* = if ((i + j) % 3 == 0) random.int(u32) else special[(i * 4 + j) % special.len];
-        const v: @Vector(4, f32) = @bitCast(bits);
-        const r = opaqueVector(v);
-        try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&r), std.mem.asBytes(&bits)));
-    }
-}
-
 test "configuration" {
     try std.testing.expect(object_layer_bits == 16 or object_layer_bits == 32);
 }

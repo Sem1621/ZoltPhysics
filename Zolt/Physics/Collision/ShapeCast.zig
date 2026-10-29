@@ -14,16 +14,6 @@
 //!   Mat44 (ShapeCast, and RShapeCast in single precision). Zolt declares it the same way: `RShapeCast.postTransformed`
 //!   is `void` in double precision.
 //! - `mShape` is a raw `const Shape *` in Jolt ("does not assume ownership over the shape"), so it stays `*const Shape`.
-//! - Zolt's in place variants for the hot call sites (PortingGuide.md "Large values": a by-value result of over 32
-//!   bytes is built in place): `initInPlace(out, ...)` is `init`, `postTransformedInPlace(transform, out)` is
-//!   `postTransformed` and `RShapeCast.postTranslatedToShapeCastInPlace(translation, out)` is
-//!   `ShapeCast(cast.PostTranslated(translation))`. Returned by value, the 144 byte cast was stored with 16 byte stores
-//!   and copied with 32 byte loads right after, which fail store forwarding. They write the matrix columns and the
-//!   bounds from their values in 16 byte pieces (Core.opaqueVector, AABox.assignInHalves) and evaluate the same
-//!   expressions on the same inputs as the by-value functions, which stay as Jolt's API; a test checks that both give
-//!   the same bytes. `out` must not overlap the inputs (asserted). Users: jobFindCCDContacts,
-//!   TransformedShape.castShape, CollisionDispatch.castShapeVsShapeWorldSpace, CompoundShape.castCompoundVsShape and
-//!   CastShapeVisitor.visitShape.
 //!
 //! Value inheritance (D12):
 //! - `ShapeCastSettings : CollideSettingsBase` is flattened (never passed as its base), checked by `virtual.checkPrefix`.
@@ -86,39 +76,6 @@ pub fn ShapeCastT(comptime Vec: type, comptime Mat: type, comptime kind: ShapeCa
             return initWithBounds(shape, scale, center_of_mass_start, direction, bounds);
         }
 
-        /// Zolt: `init` that builds the cast in `out` (for the hot call sites). Returning the 144 byte cast by value
-        /// made the compiler store the matrix and the bounds with 16 byte stores and copy them with 32 byte loads right
-        /// after, which fail store forwarding. Here the matrix columns are stored from their values (assignColumns) and
-        /// the bounds are copied from the callee's result in 16 byte halves (AABox.assignInHalves). The values are the
-        /// ones `init` computes (no float operation changes). `out` must not overlap an argument: Zig may pass a
-        /// by-value argument by reference, and `out` is written before the bounds read `center_of_mass_start` and
-        /// `scale`.
-        pub fn initInPlace(out: *Self, shape: *const Shape, scale: Vec3, center_of_mass_start: Mat, direction: Vec3) void {
-            if (Core.enable_asserts) std.debug.assert(disjoint(out, &scale) and disjoint(out, &center_of_mass_start) and disjoint(out, &direction));
-            out.shape = shape;
-            out.scale = scale;
-            assignColumns(&out.center_of_mass_start, &center_of_mass_start);
-            out.direction = direction;
-            const bounds = if (Mat == Mat44) shape.getWorldSpaceBounds(center_of_mass_start, scale) else shape.getWorldSpaceBoundsDMat44(center_of_mass_start, scale);
-            out.shape_world_bounds.assignInHalves(&bounds);
-        }
-
-        /// Zolt: `dst.* = src.*` for a Mat44 column by column (16 byte vector values, which the compiler forwards from
-        /// the stores that made `src`; Core.opaqueVector keeps it from merging two columns into one 32 byte copy), see
-        /// initInPlace. A DMat44 is assigned.
-        inline fn assignColumns(dst: *Mat, src: *const Mat) void {
-            if (Mat == Mat44) {
-                inline for (0..4) |i| dst.col[i].value = Core.opaqueVector(src.col[i].value);
-            } else dst.* = src.*;
-        }
-
-        /// Zolt: true when the bytes of `a.*` and `b.*` do not overlap (the asserts of the in place variants)
-        fn disjoint(a: anytype, b: anytype) bool {
-            const a_start = @intFromPtr(a);
-            const b_start = @intFromPtr(b);
-            return a_start + @sizeOf(@TypeOf(a.*)) <= b_start or b_start + @sizeOf(@TypeOf(b.*)) <= a_start;
-        }
-
         /// Construct a shape cast using a world transform for a shape instead of a center of mass transform
         pub fn fromWorldTransform(shape: *const Shape, scale: Vec3, world_transform: Mat, direction: Vec3) Self {
             return init(shape, scale, world_transform.preTranslated(shape.getCenterOfMass()), direction);
@@ -132,16 +89,6 @@ pub fn ShapeCastT(comptime Vec: type, comptime Mat: type, comptime kind: ShapeCa
             const start = transform.mul(self.center_of_mass_start);
             const direction = transform.multiply3x3(self.direction);
             return init(self.shape, self.scale, start, direction);
-        }
-
-        /// Zolt: `postTransformed` that builds the result in `out` (see initInPlace). `out` must not overlap `self`.
-        pub const postTransformedInPlace = if (Mat == Mat44) postTransformedInPlaceImpl else {};
-
-        fn postTransformedInPlaceImpl(self: *const Self, transform: Mat44, out: *Self) void {
-            if (Core.enable_asserts) std.debug.assert(disjoint(out, self));
-            const start = transform.mul(self.center_of_mass_start);
-            const direction = transform.multiply3x3(self.direction);
-            out.initInPlace(self.shape, self.scale, start, direction);
         }
 
         /// Translate this shape cast by translation.
@@ -173,27 +120,6 @@ pub fn ShapeCastT(comptime Vec: type, comptime Mat: type, comptime kind: ShapeCa
 
         fn toShapeCastImpl(self: *const Self) ShapeCast {
             return .initWithBounds(self.shape, self.scale, self.center_of_mass_start.toMat44(), self.direction, self.shape_world_bounds);
-        }
-
-        /// Zolt: `ShapeCast(cast.PostTranslated(translation))` (`cast.postTranslated(translation).toShapeCast()`)
-        /// built in `out` (see initInPlace; RShapeCast only). The bounds are the ones of the RShapeCast that
-        /// postTranslated makes (the DMat44 version in double precision), the start is converted with toMat44. `out`
-        /// must not overlap `self`.
-        pub const postTranslatedToShapeCastInPlace = switch (kind) {
-            .r_shape_cast => postTranslatedToShapeCastInPlaceImpl,
-            .shape_cast => {},
-        };
-
-        fn postTranslatedToShapeCastInPlaceImpl(self: *const Self, translation: Vec, out: *ShapeCast) void {
-            if (Core.enable_asserts) std.debug.assert(disjoint(out, self));
-            const start = self.center_of_mass_start.postTranslatedRVec3(translation);
-            const start_mat44 = start.toMat44();
-            out.shape = self.shape;
-            out.scale = self.scale;
-            ShapeCast.assignColumns(&out.center_of_mass_start, &start_mat44);
-            out.direction = self.direction;
-            const bounds = if (Mat == Mat44) self.shape.getWorldSpaceBounds(start, self.scale) else self.shape.getWorldSpaceBoundsDMat44(start, self.scale);
-            out.shape_world_bounds.assignInHalves(&bounds);
         }
     };
 }
@@ -371,123 +297,6 @@ test "ShapeCast / RShapeCast: construction, bounds, transforms and conversions" 
         try expect(r_cast.postTransformed(t).center_of_mass_start.eql(transformed.center_of_mass_start));
     }
     try expect(ShapeCast != RShapeCast);
-}
-
-test "ShapeCast in place variants: the same bits as the by-value constructors" {
-    // Zolt: initInPlace, postTransformedInPlace and postTranslatedToShapeCastInPlace replace `init`, `postTransformed`
-    // and `postTranslated(...).toShapeCast()` at the hot call sites (CCD, TransformedShape.castShape, the compound
-    // casts). Every field must have the bits of the by-value result, for any start, scale, direction and transform.
-    // `out` starts with garbage, so a field the in place variant forgets to write fails. Runs in both precisions: in
-    // double precision RShapeCast takes the DMat44 bounds path (Shape.getWorldSpaceBoundsDMat44), far from the origin.
-    const testing = std.testing;
-    const allocator = testing.allocator;
-    const TestShapes = @import("Shape/TestShapes.zig");
-    const Quat = @import("../../Math/Quat.zig").Quat;
-    const Real = @import("../../Math/Real.zig").Real;
-    const asBytes = std.mem.asBytes;
-
-    // A box with its center of mass off center (getWorldSpaceBounds of the local bounds) and a sphere
-    var box = TestShapes.TestBoxShape.init(allocator, Vec3.init(1, 2, 3), .{ .center_of_mass = Vec3.init(1, 0, 0) });
-    box.asShape().setEmbedded();
-    defer box.asShapeMut().deinit();
-    var sphere = TestShapes.TestSphereShape.init(allocator, 0.75);
-    sphere.asShape().setEmbedded();
-    defer sphere.asShapeMut().deinit();
-    const shapes = [_]*const Shape{ box.asShape(), sphere.asShape() };
-
-    const helpers = struct {
-        fn same(a: anytype, b: anytype) !void {
-            try testing.expect(a.shape == b.shape);
-            try testing.expectEqualSlices(u8, asBytes(&a.scale), asBytes(&b.scale));
-            // Field by field: a DMat44 (RShapeCast in double precision) has 16 bytes of padding between `col` and
-            // `col3` (bytes 48..64), which a struct copy does not have to carry (ReleaseFast copies the fields only,
-            // so `out` keeps its garbage there). A Mat44 has one field, `col`, and no padding: all its bytes.
-            inline for (std.meta.fields(@TypeOf(a.center_of_mass_start))) |field|
-                try testing.expectEqualSlices(u8, asBytes(&@field(a.center_of_mass_start, field.name)), asBytes(&@field(b.center_of_mass_start, field.name)));
-            try testing.expectEqualSlices(u8, asBytes(&a.direction), asBytes(&b.direction));
-            try testing.expectEqualSlices(u8, asBytes(&a.shape_world_bounds), asBytes(&b.shape_world_bounds));
-        }
-
-        fn garbage(p: anytype) void {
-            @memset(asBytes(p), 0xa5);
-        }
-
-        fn float(random: std.Random, range: f32) f32 {
-            return (2.0 * random.float(f32) - 1.0) * range;
-        }
-
-        fn vec3(random: std.Random, range: f32) Vec3 {
-            return Vec3.init(float(random, range), float(random, range), float(random, range));
-        }
-
-        fn rotation(random: std.Random) Quat {
-            const axis = vec3(random, 1);
-            return Quat.rotation(if (axis.lengthSq() > 1.0e-4) axis.normalized() else Vec3.axisY(), float(random, 3.1));
-        }
-
-        /// A scale of 0.5 .. 2 per axis with a random sign
-        fn scale(random: std.Random) Vec3 {
-            const s = struct {
-                fn one(r: std.Random) f32 {
-                    const v = 0.5 + 1.5 * r.float(f32);
-                    return if (r.boolean()) -v else v;
-                }
-            }.one;
-            return Vec3.init(s(random), s(random), s(random));
-        }
-    };
-
-    var prng = std.Random.DefaultPrng.init(0x15ca_57f0);
-    const random = prng.random();
-    for (0..200) |i| {
-        const shape = shapes[i % shapes.len];
-        const start = Mat44.rotationTranslation(helpers.rotation(random), helpers.vec3(random, 100));
-        const scale = if (i % 4 == 0) Vec3.one() else helpers.scale(random);
-        const direction = helpers.vec3(random, 20);
-
-        // ShapeCast.init
-        var cast: ShapeCast = undefined;
-        helpers.garbage(&cast);
-        cast.initInPlace(shape, scale, start, direction);
-        try helpers.same(cast, ShapeCast.init(shape, scale, start, direction));
-
-        // ShapeCast.postTransformed (CollisionDispatch.castShapeVsShapeWorldSpace, CastShapeVisitor)
-        const t = Mat44.rotationTranslation(helpers.rotation(random), helpers.vec3(random, 100));
-        var transformed: ShapeCast = undefined;
-        helpers.garbage(&transformed);
-        cast.postTransformedInPlace(t, &transformed);
-        try helpers.same(transformed, cast.postTransformed(t));
-
-        // RShapeCast.init far from the origin (jobFindCCDContacts)
-        const far: Real = if (i % 2 == 0) 1.0e5 else 10.0;
-        const r_position = RVec3.init(@as(Real, helpers.float(random, 1)) * far, @as(Real, helpers.float(random, 1)) * far, @as(Real, helpers.float(random, 1)) * far);
-        const r_start = RMat44.rotationTranslation(helpers.rotation(random), r_position);
-        var r_cast: RShapeCast = undefined;
-        helpers.garbage(&r_cast);
-        r_cast.initInPlace(shape, scale, r_start, direction);
-        try helpers.same(r_cast, RShapeCast.init(shape, scale, r_start, direction));
-
-        // ShapeCast(cast.PostTranslated(offset)) (TransformedShape.castShape: the base offset is near the start)
-        const offset = r_position.negate().add(RVec3.init(@as(Real, helpers.float(random, 5)), 0.25, -1.5));
-        var local: ShapeCast = undefined;
-        helpers.garbage(&local);
-        r_cast.postTranslatedToShapeCastInPlace(offset, &local);
-        try helpers.same(local, r_cast.postTranslated(offset).toShapeCast());
-
-        // RShapeCast.postTransformed exists only in single precision (Mat44 start)
-        if (@TypeOf(RShapeCast.postTransformed) != void) {
-            var r_transformed: RShapeCast = undefined;
-            helpers.garbage(&r_transformed);
-            r_cast.postTransformedInPlace(t, &r_transformed);
-            try helpers.same(r_transformed, r_cast.postTransformed(t));
-        }
-    }
-
-    // The overlap test of the in place variants' asserts: a field of `out` overlaps it, adjacent casts do not
-    var pair: [2]ShapeCast = undefined;
-    try testing.expect(!ShapeCast.disjoint(&pair[0], &pair[0].scale) and !ShapeCast.disjoint(&pair[0].shape_world_bounds, &pair[0]));
-    try testing.expect(ShapeCast.disjoint(&pair[0], &pair[1]) and ShapeCast.disjoint(&pair[1], &pair[0]));
-    try testing.expect(!ShapeCast.disjoint(&pair[0], &pair[0]));
 }
 
 test "ShapeCastSettings and ShapeCastResult" {

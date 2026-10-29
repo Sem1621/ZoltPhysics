@@ -267,9 +267,7 @@ pub const CastShapeVisitor = struct {
         const center_of_mass_transform2 = self.center_of_mass_transform2.mul(local_transform);
 
         // Transform the shape cast
-        // (Zolt: built in place, ShapeCast.initInPlace)
-        var shape_cast: ShapeCast = undefined;
-        self.shape_cast.postTransformedInPlace(local_transform.inversedRotationTranslation(), &shape_cast);
+        const shape_cast = self.shape_cast.postTransformed(local_transform.inversedRotationTranslation());
 
         CollisionDispatch.castShapeVsShapeLocalSpace(&shape_cast, self.shape_cast_settings, sub_shape.shape.get().?, sub_shape.transformScale(self.scale), self.shape_filter, center_of_mass_transform2, self.sub_shape_id_creator1, shape2_sub_shape_id, self.collector);
     }

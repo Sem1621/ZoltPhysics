@@ -6,8 +6,6 @@
 //! The `...RVec3` / `...RMat44` aliases pick the Vec3 / DVec3 (Mat44 / DMat44) overload that matches `Core.double_precision`.
 //! The default constructor (an empty, invalid box) is `AABox.empty`.
 //! `getSupport` / `getSupportingFace` make an AABox a convex object for GJK / EPA (see ConvexSupport).
-//! Zolt: `assignInHalves` copies a box that a call just returned in two 16 byte halves (store forwarding,
-//! PortingGuide.md "Large values").
 
 const std = @import("std");
 const Core = @import("../Core/Core.zig");
@@ -45,15 +43,6 @@ pub const AABox = extern struct {
 
     /// `init` for RVec3 min / max: the spelling that works in single and double precision
     pub const fromRVec3 = if (Core.double_precision) fromDVec3 else init;
-
-    /// Zolt: `self.* = src.*` with two 16 byte loads, for a box that was just stored in two 16 byte halves (an AABox
-    /// returned by a call). The compiler copies a 32 byte struct with one 32 byte load, which fails store forwarding
-    /// when the source was written with two narrower stores. Core.opaqueVector keeps the compiler from merging the
-    /// halves back into one copy; the bits are the same.
-    pub inline fn assignInHalves(self: *AABox, src: *const AABox) void {
-        self.min.value = Core.opaqueVector(src.min.value);
-        self.max.value = Core.opaqueVector(src.max.value);
-    }
 
     /// Constructor from a center and radius (AABox(Vec3Arg inCenter, float inRadius))
     pub fn fromCenterAndRadius(center: Vec3, radius: f32) AABox {
@@ -317,25 +306,6 @@ pub const AABox = extern struct {
         return self.getClosestPoint(point).sub(point).lengthSq();
     }
 };
-
-test "AABox.assignInHalves copies every bit (NaN payloads, -0, infinities, denormals)" {
-    // Zolt: the copy in 16 byte halves through Core.opaqueVector must be a bit copy like `dst.* = src.*`, also of the
-    // w lanes and of values that a float operation would change (a signaling NaN, a NaN payload, a denormal, -0)
-    const special = [_]u32{ 0x7fc0_0001, 0x7f80_0001, 0xffff_ffff, 0xff80_0000, 0x8000_0000, 0x0000_0001, 0x8000_0001, 0x7f80_0000, 0x0000_0000, 0x3f80_0000, 0xffc0_dead, 0x7fbf_ffff };
-    comptime std.debug.assert(@sizeOf(AABox) == 8 * @sizeOf(u32));
-    var prng = std.Random.DefaultPrng.init(0xaab0_c5e5);
-    const random = prng.random();
-    for (0..256) |i| {
-        var src_bits: [8]u32 = undefined;
-        for (&src_bits, 0..) |*b, j| b.* = if ((i + j) % 3 == 0) random.int(u32) else special[(i * 8 + j) % special.len];
-        var src: AABox = undefined;
-        @memcpy(std.mem.asBytes(&src), std.mem.asBytes(&src_bits));
-        var dst: AABox = undefined;
-        @memset(std.mem.asBytes(&dst), 0x5a);
-        dst.assignInHalves(&src);
-        try std.testing.expect(std.mem.eql(u8, std.mem.asBytes(&dst), std.mem.asBytes(&src_bits)));
-    }
-}
 
 test "AABox construction" {
     var box: AABox = .empty;

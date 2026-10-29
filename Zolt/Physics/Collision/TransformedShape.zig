@@ -8,8 +8,7 @@
 //! The default constructor is `.{}` (no shape).
 //!
 //! D7: the query entry points write `body_id2` of the shape filter (a `mutable` member in C++), so they take
-//! `opts: QueryOptions` (`.{ .shape_filter = filter }`, a `?*ShapeFilter`) and use a local default filter when none is
-//! given (Rule M).
+//! `opts: struct { shape_filter: ?*ShapeFilter = null }` and use a local default filter when none is given (Rule M).
 //!
 //! Renames: the `CastRay` overloads are `castRay` / `castRayCollector`; `GetSubShapeTransformedShape(id, outRemainder)`
 //! returns `Shape.SubShapeTransformedShape{ transformed_shape, remainder }`; the two `SetWorldTransform` overloads are
@@ -78,10 +77,6 @@ pub const TransformedShape = struct {
     /// Use the context from Shape
     pub const GetTrianglesContext = Shape.GetTrianglesContext;
 
-    /// Zolt: the options of castRayCollector, collidePoint, collideShape and castShape (D7): the filter that allows you
-    /// to reject collisions. The query writes its `body_id2`; without one it uses a local default filter.
-    pub const QueryOptions = struct { shape_filter: ?*ShapeFilter = null };
-
     /// Constructor, adds a reference to `shape`
     pub fn init(position_com: RVec3, rotation: Quat, shape: ?*const Shape, body_id: BodyID, opts: struct { sub_shape_id_creator: SubShapeIDCreator = .{} }) TransformedShape {
         return .{ .shape_position_com = position_com, .shape_rotation = rotation, .shape = .init(shape), .body_id = body_id, .sub_shape_id_creator = opts.sub_shape_id_creator };
@@ -127,7 +122,7 @@ pub const TransformedShape = struct {
 
     /// Cast a ray, allows collecting multiple hits. Note that this version is more flexible but also slightly slower than the CastRay function that returns only a single hit.
     /// If you want the surface normal of the hit use GetWorldSpaceSurfaceNormal(collected sub shape ID, ray.getPointOnRay(collected fraction)) on this object.
-    pub fn castRayCollector(self: *const TransformedShape, ray: RRayCast, ray_cast_settings: *const RayCastSettings, collector: *CastRayCollector, opts: QueryOptions) void {
+    pub fn castRayCollector(self: *const TransformedShape, ray: RRayCast, ray_cast_settings: *const RayCastSettings, collector: *CastRayCollector, opts: struct { shape_filter: ?*ShapeFilter = null }) void {
         if (self.shape.get()) |shape| {
             var default_filter: ShapeFilter = .{};
             const shape_filter = opts.shape_filter orelse &default_filter;
@@ -153,7 +148,7 @@ pub const TransformedShape = struct {
     /// Check if point is inside any shapes. For this tests all shapes are treated as if they were solid.
     /// For a mesh shape, this test will only provide sensible information if the mesh is a closed manifold.
     /// For each shape that collides, collector will receive a hit
-    pub fn collidePoint(self: *const TransformedShape, point: RVec3, collector: *CollidePointCollector, opts: QueryOptions) void {
+    pub fn collidePoint(self: *const TransformedShape, point: RVec3, collector: *CollidePointCollector, opts: struct { shape_filter: ?*ShapeFilter = null }) void {
         if (self.shape.get()) |shape| {
             var default_filter: ShapeFilter = .{};
             const shape_filter = opts.shape_filter orelse &default_filter;
@@ -179,7 +174,7 @@ pub const TransformedShape = struct {
     /// @param base_offset All hit results will be returned relative to this offset, can be zero to get results in world position, but when you're testing far from the origin you get better precision by picking a position that's closer e.g. mShapePositionCOM since floats are most accurate near the origin
     /// @param collector Collector that receives the hits
     /// @param opts.shape_filter Filter that allows you to reject collisions
-    pub fn collideShape(self: *const TransformedShape, shape: *const Shape, shape_scale: Vec3, center_of_mass_transform: RMat44, collide_shape_settings: *const CollideShapeSettings, base_offset: RVec3, collector: *CollideShapeCollector, opts: QueryOptions) void {
+    pub fn collideShape(self: *const TransformedShape, shape: *const Shape, shape_scale: Vec3, center_of_mass_transform: RMat44, collide_shape_settings: *const CollideShapeSettings, base_offset: RVec3, collector: *CollideShapeCollector, opts: struct { shape_filter: ?*ShapeFilter = null }) void {
         if (self.shape.get()) |my_shape| {
             var default_filter: ShapeFilter = .{};
             const shape_filter = opts.shape_filter orelse &default_filter;
@@ -202,7 +197,7 @@ pub const TransformedShape = struct {
     /// @param base_offset All hit results will be returned relative to this offset, can be zero to get results in world position, but when you're testing far from the origin you get better precision by picking a position that's closer e.g. mShapePositionCOM or shape_cast.center_of_mass_start.getTranslation() since floats are most accurate near the origin
     /// @param collector Collector that receives the hits
     /// @param opts.shape_filter Filter that allows you to reject collisions
-    pub fn castShape(self: *const TransformedShape, shape_cast: *const RShapeCast, shape_cast_settings: *const ShapeCastSettings, base_offset: RVec3, collector: *CastShapeCollector, opts: QueryOptions) void {
+    pub fn castShape(self: *const TransformedShape, shape_cast: *const RShapeCast, shape_cast_settings: *const ShapeCastSettings, base_offset: RVec3, collector: *CastShapeCollector, opts: struct { shape_filter: ?*ShapeFilter = null }) void {
         if (self.shape.get()) |shape| {
             var default_filter: ShapeFilter = .{};
             const shape_filter = opts.shape_filter orelse &default_filter;
@@ -212,9 +207,7 @@ pub const TransformedShape = struct {
             shape_filter.body_id2 = self.body_id;
 
             // Get the shape cast relative to the base offset and convert it to floats
-            // (Zolt: built in place, ShapeCast.initInPlace)
-            var local_shape_cast: ShapeCast = undefined;
-            shape_cast.postTranslatedToShapeCastInPlace(base_offset.negate(), &local_shape_cast);
+            const local_shape_cast: ShapeCast = shape_cast.postTranslated(base_offset.negate()).toShapeCast();
 
             // Get center of mass of object we're casting against relative to the base offset and convert it to floats
             const center_of_mass_transform2 = self.getCenterOfMassTransform().postTranslatedRVec3(base_offset.negate()).toMat44();

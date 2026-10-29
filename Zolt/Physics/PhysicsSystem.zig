@@ -20,11 +20,6 @@
 //!   ray against the widened bounds, the narrow phase cast through TransformedShape.castShape with the
 //!   SimShapeFilterWrapper, the early out) as local structs with `pub const overrides = .{.addHit}`, then the hit:
 //!   ManifoldBetweenTwoFaces, ContactConstraintManager.onCCDContactAdded, sensors and the average contact point.
-//! - Store forwarding (Phase 14, PortingGuide.md "Large values"): the collector holds the RShapeCast by value (Jolt's
-//!   holds a reference to a local), built in place with ShapeCast.initInPlace, and the broad phase AABoxCast copies its
-//!   bounds in 16 byte halves (AABox.assignInHalves). The hit calls TransformedShape.castShape with
-//!   `@call(.always_inline)`: LLVM inlined it there before its in place cast made it bigger, and a call per hit costs
-//!   more than it saves.
 //! - sSolveCCDContact<Type2> is `solveCCDContact(comptime type2, ...)`, Jolt's dispatch table over the motion type of
 //!   body 2 in JobResolveCCDContacts an `inline else` switch. JobResolveCCDContacts sorts the CCD bodies, shortens the
 //!   other CCD body, solves the contact and activates the bodies it hit in batches of 64 (JPH_STACK_ALLOC: a fixed
@@ -197,7 +192,6 @@ const CastShapeBodyCollector = BroadPhaseQueryFile.CastShapeBodyCollector;
 const BroadPhaseBruteForce = @import("Collision/BroadPhase/BroadPhaseBruteForce.zig").BroadPhaseBruteForce;
 const BroadPhaseQuadTree = @import("Collision/BroadPhase/BroadPhaseQuadTree.zig").BroadPhaseQuadTree;
 const BroadPhaseCastResult = @import("Collision/CastResult.zig").BroadPhaseCastResult;
-const AABoxCast = @import("Collision/AABoxCast.zig").AABoxCast;
 const ShapeCastFile = @import("Collision/ShapeCast.zig");
 const RShapeCast = ShapeCastFile.RShapeCast;
 const ShapeCastSettings = ShapeCastFile.ShapeCastSettings;
@@ -222,7 +216,6 @@ const ContactListener = ContactListenerFile.ContactListener;
 const ContactManifold = ContactListenerFile.ContactManifold;
 const ContactSettings = ContactListenerFile.ContactSettings;
 const NarrowPhaseQuery = @import("Collision/NarrowPhaseQuery.zig").NarrowPhaseQuery;
-const TransformedShape = @import("Collision/TransformedShape.zig").TransformedShape;
 const ConstraintFile = @import("Constraints/Constraint.zig");
 const Constraint = ConstraintFile.Constraint;
 const ConstraintManagerFile = @import("Constraints/ConstraintManager.zig");
@@ -3130,9 +3123,7 @@ pub const PhysicsSystem = struct {
                     const relative_cast: RShapeCast = .initWithBounds(collector.shape_cast.shape, collector.shape_cast.scale, collector.shape_cast.center_of_mass_start, direction, collector.shape_cast.shape_world_bounds);
                     var transformed_shape = body2.getTransformedShape();
                     defer transformed_shape.deinit();
-                    // (Zolt: inlined like before the in place shape casts made TransformedShape.castShape bigger: a
-                    // call per hit costs more than the copies it saves, measured in the Ragdoll scene)
-                    @call(.always_inline, TransformedShape.castShape, .{ &transformed_shape, &relative_cast, collector.shape_cast_settings, collector.shape_cast.center_of_mass_start.getTranslation(), &collector.collector.base, TransformedShape.QueryOptions{ .shape_filter = collector.shape_filter.getFilterMut() } });
+                    transformed_shape.castShape(&relative_cast, collector.shape_cast_settings, collector.shape_cast.center_of_mass_start.getTranslation(), &collector.collector.base, .{ .shape_filter = collector.shape_filter.getFilterMut() });
 
                     // Update early out fraction based on narrow phase collector
                     if (!collector.collector.reject_all)
@@ -3146,13 +3137,12 @@ pub const PhysicsSystem = struct {
             const start_tick = if (track_simulation_stats) getProcessorTickCount() else {};
 
             // Check if we collide with any other body. Note that we use the non-locking interface as we know the broadphase cannot be modified at this point.
-            // (Zolt: the cast is built in place in the collector, which holds it by value; Jolt's collector holds a
-            // reference to this local cast. ShapeCast.initInPlace)
+            const shape_cast: RShapeCast = .init(body.getShape(), Vec3.one(), body.getCenterOfMassTransform(), ccd_body.delta_position);
             var bp_collector: CCDBroadPhaseCollector = .{
                 .ccd_body = ccd_body,
                 .body1 = body,
-                .body1_extent = undefined,
-                .shape_cast = undefined,
+                .body1_extent = shape_cast.shape_world_bounds.getExtent(),
+                .shape_cast = shape_cast,
                 .shape_cast_settings = &settings,
                 .shape_filter = &shape_filter,
                 .collector = &np_collector,
@@ -3160,12 +3150,7 @@ pub const PhysicsSystem = struct {
                 .step = step,
                 .delta_time = context.step_delta_time,
             };
-            bp_collector.shape_cast.initInPlace(body.getShape(), Vec3.one(), body.getCenterOfMassTransform(), ccd_body.delta_position);
-            bp_collector.body1_extent = bp_collector.shape_cast.shape_world_bounds.getExtent();
-            const shape_cast = &bp_collector.shape_cast;
-            var box_cast: AABoxCast = .{ .box = undefined, .direction = shape_cast.direction };
-            box_cast.box.assignInHalves(&shape_cast.shape_world_bounds);
-            self.getBroadPhase().castAABoxNoLock(&box_cast, &bp_collector.base, &broadphase_layer_filter.base, &object_layer_filter.base) catch {
+            self.getBroadPhase().castAABoxNoLock(&.{ .box = shape_cast.shape_world_bounds, .direction = shape_cast.direction }, &bp_collector.base, &broadphase_layer_filter.base, &object_layer_filter.base) catch {
                 // Zolt (D5): the broad phase ran out of heap memory, latched. The hit of this body is incomplete, so
                 // this job takes no further bodies (ResolveCCDContacts skips its work)
                 context.setOutOfMemory();
