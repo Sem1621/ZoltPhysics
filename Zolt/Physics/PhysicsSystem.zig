@@ -68,8 +68,8 @@
 //!   is kept between updates, 480 bytes per lane (3,840 per group), in one heap block `contact_manager.simd_lanes` (in
 //!   the free bytes at the end of the manager: a field of PhysicsSystem would make Zig order PhysicsSystem's fields
 //!   differently): `update` grows it before it builds the jobs (`growSimdLanes`) to the demand of the steps of the
-//!   previous update (their claims, or `recordSimdLaneBound` for a step without a block) and at least to twice its
-//!   size. A growth whose allocation fails is not an error (Jolt has no such allocation): the old block stays and the
+//!   previous update (their claims, or `recordSimdLaneBound` for a step without a block) plus a quarter (Phase 15:
+//!   at least twice the old size before, which kept 6.1 MB in Pyramid; now 5.0 MB). A growth whose allocation fails is not an error (Jolt has no such allocation): the old block stays and the
 //!   batches that find no room gather from the constraints with the same bits. Only that failure is silent: the block
 //!   is heap memory that Jolt does not have, from the system's allocator, so under a bounded allocator it can make a
 //!   later heap allocation fail that Jolt makes too (SimulationArchitecture.md D5). `releaseSimdLanes` frees it between
@@ -460,8 +460,8 @@ pub const PhysicsSystem = struct {
 
     /// Zolt addition (Phase 14, class A): before the jobs of an update, grow the memory of the SIMD LaneGroups
     /// (ContactConstraintManager.simd_lanes) when the steps of the previous update asked for more groups than it holds:
-    /// to their demand (recordSimdLaneClaims, recordSimdLaneBound), and at least to twice its number of groups, so that
-    /// islands that grow from update to update cause few growths. The new block is allocated before the old one is
+    /// to their demand (recordSimdLaneClaims, recordSimdLaneBound) plus a quarter, so that islands that grow from update
+    /// to update cause few growths (Phase 15: Ragdoll 11 in 500 steps) and little memory stays unused. The new block is allocated before the old one is
     /// freed. A failed allocation keeps the old block (or none): the batches that find no room gather, with the same
     /// bits. It is not an error: Jolt has no such allocation (SimulationArchitecture.md D5). (A block that was allocated
     /// is extra heap memory of the system's allocator until releaseSimdLanes or deinit: with a bounded allocator it can
@@ -477,7 +477,8 @@ pub const PhysicsSystem = struct {
         if (demand <= lanes.capacity)
             return;
         const limit = if (builtin.is_test) @min(self.simd_plans.lanes.max_capacity, ContactConstraintSimd.max_lane_groups) else ContactConstraintSimd.max_lane_groups;
-        const capacity = @min(@max(demand, lanes.capacity *| 2), limit);
+        // (The first block is the bound of recordSimdLaneBound; a later one has room for a quarter more claims)
+        const capacity = @min(if (lanes.block == null) demand else demand +| demand / 4, limit);
         if (capacity <= lanes.capacity)
             return;
         lanes.replace(self.contact_manager.allocator, capacity) catch {

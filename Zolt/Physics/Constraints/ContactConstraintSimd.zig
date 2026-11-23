@@ -99,8 +99,8 @@
 //! keeps that data in lane order for the whole step, in `LaneGroup`s (3,840 bytes on 64 bit targets, 480 per lane):
 //! - Memory: one heap block, kept between updates (`SimdLanes`, ContactConstraintManager.simd_lanes): a 64 byte header
 //!   with the bump counter of the step on its own cache line, then the LaneGroups. PhysicsSystem grows it before the jobs
-//!   of an update, never in a job (SimulationArchitecture.md D5): to what the steps of the previous update asked for and
-//!   at least to twice its size (the first time to `laneGroupBound`). A failed growth keeps the old block or none.
+//!   of an update, never in a job (SimulationArchitecture.md D5): to what the steps of the previous update asked for plus
+//!   a quarter (the first time to `laneGroupBound`). A failed growth keeps the old block or none.
 //! - Claim: at the warm start of a planned batch whose split island has velocity steps, after planBatch, PhysicsSystem
 //!   adds numLaneGroups(the planned count) to the counter. When the groups fit, `buildLanes` fills them and the batch's
 //!   lane word (LargeIslandSplitter.batchLaneWord, the entry after the plan word) gets `laneWord(first)`, otherwise
