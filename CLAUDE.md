@@ -125,4 +125,7 @@ If `zig` is missing (fresh cloud container), the SessionStart hook installs it; 
   LaneGroups (a planned batch's step constant contact data in lane order for the step, ContactConstraintSimd) and the
   character pair data on fewer cache lines (CharacterBoundsCache, line pinned). A third (MotionProperties in Jolt's
   order, store forwarding sites in place) missed its wall clock keep rule and was reverted.
+- Phase 15 kept two more class A changes: the workers of JobSystemThreadPool spin for 15 us before they sleep
+  (`spin_before_sleep_ns`, 0 = Jolt's behavior; `ZoltPerformanceTest -spin_ns=<ns>`) and the LaneGroups block grows to
+  the demand plus a quarter instead of doubling.
 - The port tracks Jolt v5.6.1 at commit `5830c34` (see Roadmap for syncing with upstream).
