@@ -2704,7 +2704,7 @@ test "PhysicsSystem large island: the SIMD LaneGroups give the states of the gat
         var lanes_opts = opts;
         lanes_opts.simd_lanes = true;
 
-        // Room enough: LaneGroups from the second update on, the growths double
+        // Room enough: LaneGroups from the second update on, the block grows with the demand
         var counts: [5]u32 = undefined;
         {
             var states: std.ArrayList(u8) = .empty;

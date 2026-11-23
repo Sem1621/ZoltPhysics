@@ -30,6 +30,13 @@
 //!   keeps the profiler and its events when it has enough ring buffers, so `setNumThreads(0)` stops the workers before
 //!   the events are read; more threads need a new profiler (the old events are dropped). A worker records the time it
 //!   waits for jobs as idle time. `getJobProfiler` returns the profiler.
+//! - Zolt (Phase 15): a worker thread that finds no job spins for a short time (`opts.spin_before_sleep_ns` of `init`,
+//!   default_spin_before_sleep_ns unless the caller says otherwise, 0 turns it off) before it sleeps on the semaphore
+//!   like Jolt's: the jobs of a physics step come in bursts a few microseconds apart, and a futex sleep and wake up
+//!   cost more than that. The spin only changes when a worker takes a job, never what the jobs compute. It counts
+//!   iterations of the CPU's pause instruction, calibrated when the threads start (the instruction takes 10 to 140
+//!   cycles depending on the CPU). The workers don't spin when the pool has more threads (workers + 1) than the
+//!   machine has CPUs: a spinning thread would then keep a CPU from a thread with work.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -90,11 +97,21 @@ pub const JobSystemThreadPool = struct {
     /// Semaphore used to signal worker threads that there is new work
     semaphore: Semaphore = .{},
 
+    /// Zolt: how long a worker thread spins before it sleeps on the semaphore, in nanoseconds (see the top of this file)
+    spin_before_sleep_ns: u32 = default_spin_before_sleep_ns,
+
+    /// Zolt: the same in iterations of the spin loop, set when the threads start (0: the workers don't spin)
+    spin_iterations: u32 = 0,
+
     /// Boolean to indicate that we want to stop the job system
     quit: std.atomic.Value(bool) = .init(false),
 
     /// Array of jobs (fixed size)
     const AvailableJobs = FixedSizeFreeList(Job);
+
+    /// Zolt: the default time a worker thread spins before it sleeps (Roadmap Phase 15: 12 to 16 us were measured as
+    /// 1000 pause instructions on a 2.1 GHz Xeon)
+    pub const default_spin_before_sleep_ns: u32 = 15_000;
 
     // The job queue
     const queue_length: u32 = 1024;
@@ -187,10 +204,12 @@ pub const JobSystemThreadPool = struct {
     /// max_barriers: Max number of barriers that can be allocated at any time
     /// opts.num_threads: Number of threads to start (the number of concurrent jobs is 1 more because the main thread will also run jobs while waiting for a barrier to complete). Use -1 to auto detect the amount of CPU's.
     /// opts.profile_capacity: Zolt, number of events per thread of the job profiler (`-Djob_profile=true` only)
-    pub fn init(self: *JobSystemThreadPool, allocator: std.mem.Allocator, io: std.Io, max_jobs: u32, max_barriers: u32, opts: struct { num_threads: i32 = -1, profile_capacity: u32 = JobProfiler.default_capacity }) Error!void {
+    /// opts.spin_before_sleep_ns: Zolt, how long a worker thread without a job spins before it sleeps (0: it sleeps at once, like Jolt's)
+    pub fn init(self: *JobSystemThreadPool, allocator: std.mem.Allocator, io: std.Io, max_jobs: u32, max_barriers: u32, opts: struct { num_threads: i32 = -1, profile_capacity: u32 = JobProfiler.default_capacity, spin_before_sleep_ns: u32 = default_spin_before_sleep_ns }) Error!void {
         std.debug.assert(self.base.barriers == null); // Already initialized?
         self.allocator = allocator;
         self.io = io;
+        self.spin_before_sleep_ns = opts.spin_before_sleep_ns;
         if (Core.job_profile) self.profile_capacity = opts.profile_capacity;
 
         self.base = try .init(allocator, io, max_barriers);
@@ -349,6 +368,9 @@ pub const JobSystemThreadPool = struct {
         // Don't quit the threads
         self.quit.store(false, .seq_cst);
 
+        // Zolt: how many iterations the workers spin before they sleep (see the top of this file)
+        self.spin_iterations = self.calibrateSpin(@intCast(num_threads));
+
         // Allocate heads
         const thread_count: usize = @intCast(num_threads);
         self.heads = try self.allocator.alloc(std.atomic.Value(u32), thread_count);
@@ -405,6 +427,34 @@ pub const JobSystemThreadPool = struct {
         self.tail_state.tail.store(0, .seq_cst);
     }
 
+    /// Zolt (Phase 15): the number of spin loop iterations that take spin_before_sleep_ns on this machine, 0 when the
+    /// pool has more threads than the machine has CPUs (or when the count of CPUs is unknown)
+    fn calibrateSpin(self: *const JobSystemThreadPool, num_threads: u32) u32 {
+        if (self.spin_before_sleep_ns == 0)
+            return 0;
+        const cpu_count = std.Thread.getCpuCount() catch return 0;
+        if (@as(usize, num_threads) + 1 > cpu_count)
+            return 0;
+
+        // The fastest of 3 measurements: one that the OS interrupted would give too few iterations
+        const calibration_iterations = 256;
+        var best_ns: u64 = std.math.maxInt(u64);
+        for (0..3) |_| {
+            const start = std.Io.Clock.awake.now(self.io).nanoseconds;
+            for (0..calibration_iterations) |_|
+                std.atomic.spinLoopHint();
+            const elapsed = std.Io.Clock.awake.now(self.io).nanoseconds - start;
+            best_ns = @min(best_ns, std.math.cast(u64, elapsed) orelse continue);
+        }
+        if (best_ns == std.math.maxInt(u64))
+            return 0;
+        const iterations = @as(u64, self.spin_before_sleep_ns) * calibration_iterations / @max(best_ns, 1);
+        return @intCast(std.math.clamp(iterations, 1, max_spin_iterations));
+    }
+
+    /// Zolt: upper bound of spin_iterations (a clock that does not advance during the calibration)
+    const max_spin_iterations = 100_000;
+
     /// Entry point for a thread
     fn threadMain(self: *JobSystemThreadPool, thread_index: i32) void {
         // Naming the thread ("Worker %d"), enabling floating point exceptions and JPH_PROFILE_THREAD_START are not ported (see the top of this file)
@@ -421,7 +471,14 @@ pub const JobSystemThreadPool = struct {
         while (!self.quit.load(.seq_cst)) {
             // Wait for jobs
             const idle_start = if (Core.job_profile) JobProfiler.begin(profiler) else {};
-            self.semaphore.acquire(self.io, .{});
+            // Zolt: spin for a short time first, the next jobs often come within microseconds (see the top of this file)
+            var spins = self.spin_iterations;
+            const acquired = while (spins > 0) : (spins -= 1) {
+                if (self.semaphore.tryAcquire()) break true;
+                std.atomic.spinLoopHint();
+            } else false;
+            if (!acquired)
+                self.semaphore.acquire(self.io, .{});
             if (Core.job_profile) JobProfiler.end(profiler, .idle, "Idle: wait for jobs", idle_start);
 
             // Loop over the queue
@@ -564,6 +621,54 @@ test "JobSystemThreadPool runs many jobs" {
         try std.testing.expectEqual(@as(u32, @intCast((round + 1) * num_jobs)), context.total.load(.monotonic));
         for (&context.counts) |*count|
             try std.testing.expectEqual(@as(u32, @intCast(round + 1)), count.load(.monotonic));
+    }
+}
+
+test "JobSystemThreadPool workers spin before they sleep (spin_before_sleep_ns)" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+    const cpu_count: i32 = @intCast(std.Thread.getCpuCount() catch 1);
+
+    const Context = struct {
+        total: std.atomic.Value(u32) = .init(0),
+
+        fn run(self: *@This()) void {
+            _ = self.total.fetchAdd(1, .monotonic);
+        }
+    };
+
+    // Without a spin (like Jolt), with the default and with a spin longer than the pauses between the bursts below
+    for ([_]u32{ 0, JobSystemThreadPool.default_spin_before_sleep_ns, 2_000_000 }) |spin_ns| {
+        var pool: JobSystemThreadPool = .empty;
+        try pool.init(std.testing.allocator, std.testing.io, 1024, 1, .{ .num_threads = 1, .spin_before_sleep_ns = spin_ns });
+        defer pool.deinit();
+        const job_system = pool.jobSystem();
+
+        // The workers spin only when asked to and when every thread of the pool has a CPU
+        if (spin_ns == 0 or cpu_count < 2) {
+            try std.testing.expectEqual(@as(u32, 0), pool.spin_iterations);
+        } else {
+            try std.testing.expect(pool.spin_iterations >= 1 and pool.spin_iterations <= JobSystemThreadPool.max_spin_iterations);
+        }
+
+        // Bursts of jobs without a barrier: only the worker runs them, from its spin or after its sleep
+        var context: Context = .{};
+        const num_bursts = 50;
+        const jobs_per_burst = 8;
+        for (0..num_bursts) |burst| {
+            for (0..jobs_per_burst) |_| {
+                var handle = try job_system.createJob("Burst", Color.red, .init(Context.run, .{&context}), .{});
+                handle.deinit();
+            }
+            while (context.total.load(.monotonic) != (burst + 1) * jobs_per_burst)
+                std.Thread.yield() catch {};
+        }
+        try std.testing.expectEqual(@as(u32, num_bursts * jobs_per_burst), context.total.load(.monotonic));
+
+        // More threads than CPUs: no spin. Back to one worker: the spin is calibrated again
+        try pool.setNumThreads(cpu_count);
+        try std.testing.expectEqual(@as(u32, 0), pool.spin_iterations);
+        try pool.setNumThreads(1);
+        try std.testing.expectEqual(spin_ns != 0 and cpu_count >= 2, pool.spin_iterations != 0);
     }
 }
 

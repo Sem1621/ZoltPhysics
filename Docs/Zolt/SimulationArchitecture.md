@@ -1438,10 +1438,10 @@ lane), and every velocity iteration runs the same kernel (`solveGroupFrom`) with
   on its own cache line, then the LaneGroups. It is kept between updates and freed by `deinit` or
   `PhysicsSystem.releaseSimdLanes`. `update` grows it before the jobs (D5, "An optional heap allocation before the
   jobs"): to the most LaneGroups that a step of the previous update claimed (the counter counts the claims that found
-  no room too) and at least to twice its size; without a block the demand is `laneGroupBound` over the split islands.
-  Growths in the benchmark scenes (-t=1): Pyramid 2 (798, then 1,596 LaneGroups: 6.1 MB, for at most 1,011 claimed in
-  a step), Ragdoll 80 steps 6 (15 to 480: 1.8 MB, the ragdolls pile up during the run), ConvexVsMesh 500 steps 2 (32,
-  64), the others 0. A failed growth is silent: the batches that find no room gather. The bound of the first growth
+  no room too) plus a quarter (Phase 15; before: at least to twice its size); without a block to `laneGroupBound`
+  over the split islands. Growths in the benchmark scenes (500 steps, -t=4): Pyramid 3 (798, 1,031, then
+  1,308 LaneGroups: 5.0 MB, for at most 1,047 claimed in a step; 1,596 and 6.1 MB with the doubling), Ragdoll 11 (15 to
+  466: 1.8 MB, the ragdolls pile up during the run; 6 growths to 480 before), ConvexVsMesh 2 (32, 41), the others 0. A failed growth is silent: the batches that find no room gather. The bound of the first growth
   does not know the batches (splitIsland builds them later): an island whose parallel batches all have fewer than 4
   contacts claims nothing, and its first block stays unused until `releaseSimdLanes` or `deinit` (the ContactScene
   without manifold reduction of PhysicsSystemTests: a bound of 102 LaneGroups, 391,744 bytes, no claim).

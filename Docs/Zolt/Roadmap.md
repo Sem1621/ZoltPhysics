@@ -448,7 +448,7 @@ percent, so a small difference either way is noise.
 - Tier 1b (class A, beyond Jolt; measure with the job profiler first): SIMD contact solving inside the splits of
   large islands (done in Phase 11), a cached AABB prefilter for characters (done in Phase 12 as exact bounds caches),
   island scheduling (Phase 12: the large island sorts; Phase 13 measured the parallel final batch: not worth it),
-  spinning in the thread pool (measured in Phases 12 and 13: not worth it). Phase 13 added SIMD plans per step, hot
+  spinning in the thread pool (measured in Phases 12 and 13: not worth it; done in Phase 15 on a host where it was). Phase 13 added SIMD plans per step, hot
   atomics on their own cache lines and a body pool.
 - Tier 2 (class B, behind `-Djolt_compat`): box-box SAT instead of EPA, graph-colored batches of small islands,
   8-wide trees. (The FMA math mode came in Phase 11 as `-Dfma`, with Jolt's own sites and a C++ oracle.)
@@ -947,6 +947,73 @@ spin stays a candidate.
 - CharacterVirtual's gain is shape specific: a box, cylinder, convex hull or tapered shape, or an offset center of mass,
   reads one or two replay lines more.
 - The spin before the futex sleep: ConvexVsMesh's short idle spans are 4.0% at 4 threads on this host.
+
+Phase 15 took up the spin and the LaneGroups memory and profiled FindCollisions; its decision table says what became
+of them.
+
+### Phase 15: class A, measured first (spin before the sleep, LaneGroups memory) ✅
+
+The candidates that Phase 14 left open, with the same method: a change keeps Jolt's results bit for bit (the parity
+suite and the PerformanceTest hashes at every thread count), a go rule is fixed before the measurement and a keep rule
+is measured on the final code. The host is Phase 14's type (2.1 GHz Xeon, 48 KB / 2 MB / 260 MB, 4 cores). It exposes
+no hardware counters (no `perf`), so the store forwarding question (LS) stays open.
+
+| Item | Go rule | Measured | Keep rule | Measured | Decision |
+|---|---|---|---|---|---|
+| P: spin before the futex sleep | idle spans < 50 us >= 3% of the thread time at 4 threads in a scene, and a prototype gives ConvexVsMesh at 4 threads >= 3% more steps/s than the same binary without the spin, no scene -3% | 3.15% / 3.34% / 3.19% in ConvexVsMesh (3 runs); 1,000 pause iterations (12-16 us): 1.036 (12 of 15 rounds, p = 0.035), lowest row 0.994 | ConvexVsMesh at 4 threads >= 1.03 against the same binary with `-spin_ns=0` in 30 rounds, no row below 0.97 with a significant sign test | 1.0300 (21 of 30, p = 0.043); lowest row 0.995 | done |
+| M: LaneGroups memory | (no go measurement: one line) | | Ir of Pyramid, Ragdoll and ConvexVsMesh unchanged, no row below 0.99 with a significant sign test in 15 rounds | Ir within 0.003%; Pyramid 0.996 / 0.984 (p = 1.0 / 0.30), Ragdoll 1.021 / 1.003 at 1 / 4 threads | done |
+| F: FindCollisions of Pyramid | a function whose instructions exceed Jolt's by >= 1% of the scene's | none: the job is 0.977 of Jolt's; EPAConvexHullBuilder 1.11e9 Ir (29% of the scene) against Jolt's 1.13e9 | | | no item |
+| K2: character pair data for other shapes | a scene that shows the cost | PerformanceTest has none (its characters are capsules) | | | not done |
+
+**P: the workers spin before they sleep.** A worker thread of JobSystemThreadPool that finds no job slept on the
+semaphore at once, like Jolt's. The jobs of a step come in bursts a few microseconds apart, and a futex sleep and wake
+up cost more than such a pause. Now the worker first spins for `spin_before_sleep_ns` (an option of `init`, 15 us by
+default, 0 for Jolt's behavior) with the new `Semaphore.tryAcquire`. The spin counts iterations of the CPU's pause
+instruction, calibrated when the threads start (the instruction takes 10 to 140 cycles depending on the CPU; 12-16 ns
+here), and it is off when the pool has more threads (workers + 1) than the machine has CPUs: two prototype runs with 8
+threads on these 4 cores were 2% and 9% slower with the spin. Only the moment a worker takes a job changes, never what
+a job computes. `ZoltPerformanceTest -spin_ns=<ns>` sets the time. The go measurement used a prototype with 100, 300,
+1,000 and 3,000 pause iterations: ConvexVsMesh at 4 threads 1.006, 1.051 (p = 0.12), 1.036 and 1.038 (both 12 of 15
+rounds).
+
+Steps per second, 30 interleaved rounds of the final binary without the spin (`-spin_ns=0`), with it (the default) and
+of Phase 14's master (medians; the ratio is the median of the paired per-round ratios spin / no spin, with the rounds
+the spin won and the p value of the sign test):
+
+| Scene | Threads | No spin | Spin | Phase 14 | Spin / no spin |
+|---|---|---|---|---|---|
+| ConvexVsMesh | 2 | 346.9 | 346.9 | 343.4 | 0.999 (15/30, p = 1.00) |
+| ConvexVsMesh | 4 | 542.5 | 559.8 | 537.2 | 1.030 (21/30, p = 0.043) |
+| HighSpeed | 2 | 203.2 | 201.1 | 201.9 | 1.000 (15/30, p = 1.00) |
+| HighSpeed | 4 | 289.3 | 288.3 | 287.4 | 1.004 (16/30, p = 0.86) |
+| Ragdoll | 2 | 77.4 | 78.4 | 77.1 | 1.015 (19/30, p = 0.20) |
+| Ragdoll | 4 | 129.7 | 129.7 | 129.4 | 1.008 (17/30, p = 0.59) |
+| Pyramid | 2 | 125.7 | 125.3 | 127.5 | 0.995 (14/30, p = 0.86) |
+| Pyramid | 4 | 189.2 | 189.7 | 188.8 | 0.999 (15/30, p = 1.00) |
+| CharacterVirtual | 2 | 520.0 | 543.2 | 520.3 | 1.043 (22/30, p = 0.016) |
+| CharacterVirtual | 4 | 549.3 | 566.7 | 556.1 | 1.028 (17/30, p = 0.59) |
+
+The gain is small and only two rows are significant: ConvexVsMesh at 4 threads, which meets its rule at the limit, and
+CharacterVirtual at 2 threads. The CPU time of a run (user + system) does not rise: the ratio spin / no spin of its
+medians lies between 0.977 and 1.008. Job profiles of the final build at 4 threads (3 runs each, without / with the
+spin): the idle spans under 50 us fall from 3.70% to 2.07% of the thread time in ConvexVsMesh, 1.34% to 0.57% in
+HighSpeed, 1.68% to 0.81% in CharacterVirtual, 0.72% to 0.48% in Ragdoll and 0.62% to 0.32% in Pyramid (medians); the
+wakeups per worker and step stay (8.7 to 10.6).
+
+**M: the LaneGroups block grows to the demand plus a quarter.** Phase 14's block grew to the claims of the previous
+update and at least to twice its size. Now an existing block grows to the claims plus a quarter (the first block is
+still `laneGroupBound`). In 500 steps at 4 threads Pyramid keeps 1,308 LaneGroups (5.0 MB) instead of 1,596 (6.1 MB)
+for at most 1,047 claimed in a step, in 3 growths instead of 2; Ragdoll 466 instead of 480, in 11 growths instead of 6;
+ConvexVsMesh 41 instead of 64. A batch that finds no room in the update of a growth gathers with the same bits.
+(The wall clock rows above were measured on a variant whose first block had the quarter too.)
+
+**Open, Phase 16 candidates.**
+- EPAConvexHullBuilder is 29% of Pyramid's instructions on both sides (Zolt: addPoint with its inlined findEdge 0.61e9,
+  createTriangle 0.50e9): the box against box contacts of the pyramid go through EPA. Jolt has the same cost, so a gain
+  needs a faster formulation with the same bits (Tier 2 lists box-box SAT, which is class B).
+- The store forwarding failures (LS) still need a machine with hardware counters.
+- The character pair data of other shapes needs a benchmark scene first.
+- The spin's 15 us were chosen on one host type; a machine with more cores than this one (4) may want another value.
 
 ### Deferred / out of scope for now
 - `Jolt/Compute/DX12`, `Jolt/Compute/VK`, `Jolt/Compute/MTL`: the GPU compute backends (and `ComputeSystem::mShaderLoader`).

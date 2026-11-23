@@ -101,7 +101,8 @@ ALLOW = [
     (r"^Physics\.PhysicsSystem\.PhysicsSystem\.(init|deinit)$", {"rodata"}, 0x580, "PhysicsSystem init and deinit"),
     (r"^Physics\.Constraints\.ContactConstraintManager\.ContactConstraintManager\.(init|deinit)$", {"rodata"}, 0x180,
      "ContactConstraintManager init and deinit"),
-    (r"^Core\.JobSystemThreadPool\.JobSystemThreadPool\.deinit$", {"rodata"}, 0x21c0, "JobSystemThreadPool teardown"),
+    # (Phase 15: the two spin fields of JobSystemThreadPool make it one cache line larger, 0x21c0 -> 0x2200 bytes.)
+    (r"^Core\.JobSystemThreadPool\.JobSystemThreadPool\.deinit$", {"rodata"}, 0x2200, "JobSystemThreadPool teardown"),
     # Job system creation: the job list of each barrier
     (r"^Core\.JobSystemWithBarrier\.JobSystemWithBarrier\.init$", {"fill"}, 0x4001, "JobSystemWithBarrier creation"),
     # A random generator (std::mt19937) is created by value when a scene or hair settings are set up
