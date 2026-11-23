@@ -50,6 +50,8 @@
 //!   run loses its oldest events, which the trace and tools/job_trace_stats.py report.
 //! - `-phase_times` (Zolt): after the stat line of a run, print the total time of the scene updates (UpdateTest) and of
 //!   the physics updates (PhysicsSystem::Update), in milliseconds. The hash does not change.
+//! - `-spin_ns=<nanoseconds>` (Zolt): how long a worker thread without a job spins before it sleeps
+//!   (JobSystemThreadPool's spin_before_sleep_ns; 0: it sleeps at once, like Jolt's). The hash does not change.
 
 const std = @import("std");
 const zolt = @import("zolt");
@@ -321,6 +323,7 @@ pub fn main(init: std.process.Init) !u8 {
     var disable_sleep = false;
     var enable_profiler = false;
     var enable_phase_times = false; // Zolt: -phase_times
+    var spin_before_sleep_ns: u32 = JobSystemThreadPool.default_spin_before_sleep_ns; // Zolt: -spin_ns
     var enable_debug_renderer = false; // JPH_DEBUG_RENDERER
     var enable_per_frame_recording = false;
     var record_state = false;
@@ -378,6 +381,8 @@ pub fn main(init: std.process.Init) !u8 {
             enable_profiler = true;
         } else if (std.mem.eql(u8, arg, "-phase_times")) {
             enable_phase_times = true;
+        } else if (std.mem.startsWith(u8, arg, "-spin_ns=")) {
+            spin_before_sleep_ns = @bitCast(atoi(arg[9..]));
         } else if (zolt.Core.debug_renderer and std.mem.eql(u8, arg, "-r")) { // JPH_DEBUG_RENDERER
             enable_debug_renderer = true;
         } else if (std.mem.eql(u8, arg, "-f")) {
@@ -401,6 +406,7 @@ pub fn main(init: std.process.Init) !u8 {
                 "-t=max: Test with the number of threads available on the system\n" ++
                 "-p: Write out profiles\n" ++
                 "-phase_times: Print the time of the scene and the physics updates (Zolt)\n" ++
+                "-spin_ns=<nanoseconds>: How long a worker thread spins before it sleeps, 0 = not at all (Zolt)\n" ++
                 "-r: Record debug renderer output for JoltViewer\n" ++
                 "-f: Record per frame timings\n" ++
                 "-no_sleep: Disable sleeping\n" ++
@@ -510,6 +516,7 @@ pub fn main(init: std.process.Init) !u8 {
                 var job_system: JobSystemThreadPool = .empty;
                 try job_system.init(allocator, io, physics_settings.max_physics_jobs, physics_settings.max_physics_barriers, .{
                     .num_threads = @bitCast(num_threads),
+                    .spin_before_sleep_ns = spin_before_sleep_ns,
                     // Zolt: with -p the trace holds the whole run of 500 steps (about 200 events per step and thread)
                     .profile_capacity = if (enable_profiler) profile_capacity else zolt.JobProfiler.default_capacity,
                 });

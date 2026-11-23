@@ -54,6 +54,15 @@ pub const Semaphore = struct {
         }
     }
 
+    /// Zolt addition (Phase 15): take 1 from the count when that needs no waiting, returns false otherwise (the count
+    /// is then unchanged). The worker threads of JobSystemThreadPool call it while they spin before they sleep.
+    pub fn tryAcquire(self: *Semaphore) bool {
+        var count = self.count.load(.monotonic);
+        while (count > 0)
+            count = self.count.cmpxchgWeak(count, count - 1, .acquire, .monotonic) orelse return true;
+        return false;
+    }
+
     /// Get the current value of the semaphore (negative when threads are waiting)
     pub fn getValue(self: *const Semaphore) i32 {
         return self.count.load(.monotonic);
@@ -102,6 +111,22 @@ test "Semaphore single threaded counting" {
     try std.testing.expectEqual(@as(i32, 2), semaphore.getValue());
     semaphore.acquire(io, .{});
     semaphore.acquire(io, .{});
+    try std.testing.expectEqual(@as(i32, 0), semaphore.getValue());
+
+    // The OS semaphore was never needed
+    try std.testing.expectEqual(@as(u32, 0), semaphore.semaphore.permits.load(.monotonic));
+}
+
+test "Semaphore tryAcquire takes from a positive count only" {
+    const io = std.testing.io;
+    var semaphore: Semaphore = .{};
+    try std.testing.expect(!semaphore.tryAcquire());
+    try std.testing.expectEqual(@as(i32, 0), semaphore.getValue());
+
+    semaphore.release(io, .{ .number = 2 });
+    try std.testing.expect(semaphore.tryAcquire());
+    try std.testing.expect(semaphore.tryAcquire());
+    try std.testing.expect(!semaphore.tryAcquire());
     try std.testing.expectEqual(@as(i32, 0), semaphore.getValue());
 
     // The OS semaphore was never needed
